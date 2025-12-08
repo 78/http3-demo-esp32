@@ -14,26 +14,18 @@
 #include <esp_pm.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include <esp_http_client.h>
+#include <esp_timer.h>
+#include <esp_crt_bundle.h>
 #include "http3_manager.h"
 #include "wifi_station.h"
 #include "ssid_manager.h"
-#include "uart_eth_modem.h"
+#include "uart_eth_modem/uart_eth_modem.h"
 #include "pmic/pmic.h"
+#include "quic_test.h"
 
 // 选择网络模式：1 = WiFi模式, 0 = 4G模式
 #define USE_WIFI_MODE 0
-
-// Embedded resource: test.ogg
-extern const uint8_t _binary_test_ogg_start[] asm("_binary_test_ogg_start");
-extern const uint8_t _binary_test_ogg_end[] asm("_binary_test_ogg_end");
-
-static inline const uint8_t* GetTestOggData() {
-    return _binary_test_ogg_start;
-}
-
-static inline size_t GetTestOggSize() {
-    return _binary_test_ogg_end - _binary_test_ogg_start;
-}
 
 static const char *TAG = "HTTPS_DEMO";
 
@@ -123,8 +115,13 @@ static bool InitModemHardware() {
     return true;
 }
 
+// Event bits for 4G network initialization
+static constexpr uint32_t kEventNetworkConnected = (1 << 0);
+static constexpr uint32_t kEventNetworkError = (1 << 1);
+
 /**
  * 初始化4G网卡并等待网络就绪
+ * 使用 event group 等待网络连接或错误事件
  */
 static bool Init4GNetwork() {
     ESP_LOGI(TAG, "Initializing 4G Network...");
@@ -144,28 +141,68 @@ static bool Init4GNetwork() {
         .rx_pin = MODEM_RX_PIN,
         .mrdy_pin = MODEM_DTR_PIN,
         .srdy_pin = MODEM_RI_PIN,
-        .rx_buffer_size = 4096,
     };
     
     g_modem = std::make_unique<UartEthModem>(config);
-    g_modem->SetDebug(true);
+    g_modem->SetDebug(false);
 
-    g_modem->SetNetworkStatusCallback([](UartEthModem::NetworkStatus status) {
-        ESP_LOGI(TAG, "Network status changed: %s", UartEthModem::GetNetworkStatusName(status));
+    // Create event group for waiting network events
+    EventGroupHandle_t network_event_group = xEventGroupCreate();
+    if (network_event_group == nullptr) {
+        ESP_LOGE(TAG, "Failed to create event group");
+        g_modem.reset();
+        return false;
+    }
+
+    // Set callback to notify event group on network events
+    g_modem->SetNetworkEventCallback([network_event_group](UartEthModem::UartEthModemEvent event) {
+        ESP_LOGI(TAG, "Network event: %s", UartEthModem::GetNetworkEventName(event));
+        
+        switch (event) {
+            case UartEthModem::UartEthModemEvent::Connected:
+                xEventGroupSetBits(network_event_group, kEventNetworkConnected);
+                break;
+            case UartEthModem::UartEthModemEvent::ErrorNoSim:
+            case UartEthModem::UartEthModemEvent::ErrorRegistrationDenied:
+            case UartEthModem::UartEthModemEvent::ErrorInitFailed:
+            case UartEthModem::UartEthModemEvent::ErrorNoCarrier:
+                xEventGroupSetBits(network_event_group, kEventNetworkError);
+                break;
+            case UartEthModem::UartEthModemEvent::Connecting:
+            case UartEthModem::UartEthModemEvent::Disconnected:
+                // These are informational, no action needed
+                break;
+        }
     });
     
     esp_err_t ret = g_modem->Start();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start modem: %s", esp_err_to_name(ret));
+        vEventGroupDelete(network_event_group);
         g_modem.reset();
         return false;
     }
     
     ESP_LOGI(TAG, "Waiting for network ready...");
-    auto status = g_modem->WaitForNetworkReady(120000);
-    if (status != UartEthModem::NetworkStatus::Ready) {
-        ESP_LOGE(TAG, "Network not ready, status: %s", 
-                 UartEthModem::GetNetworkStatusName(status));
+    
+    // Wait for either Connected or Error event with 120s timeout
+    EventBits_t bits = xEventGroupWaitBits(
+        network_event_group,
+        kEventNetworkConnected | kEventNetworkError,
+        pdTRUE,   // Clear bits on exit
+        pdFALSE,  // Wait for any bit (OR)
+        pdMS_TO_TICKS(120000)
+    );
+    
+    if (bits & kEventNetworkError) {
+        ESP_LOGE(TAG, "Network initialization failed with error");
+        g_modem->Stop();
+        g_modem.reset();
+        return false;
+    }
+    
+    if (!(bits & kEventNetworkConnected)) {
+        ESP_LOGE(TAG, "Network connection timeout");
         g_modem->Stop();
         g_modem.reset();
         return false;
@@ -221,271 +258,115 @@ static bool Init4GNetwork() {
 
 
 /**
- * 使用 Http3Manager 进行共享连接测试
- * 
- * 测试流程：
- * 1. 建立连接
- * 2. 测试并发请求（GET / 和 GET /pocket-sage/health）
- * 3. 等待30秒
- * 4. 测试 ChatStream（POST /pocket-sage/chat/stream）
- * 5. 不关闭连接，等待服务器关闭
+ * HTTP 客户端下载测试
+ * 使用 ESP-IDF 自带的 esp_http_client 下载文件并打印速度
  */
-void TestHttp3ManagerSharedConnection(const char* hostname, uint16_t port) {
+static void TestHttpClientDownload(const char* url) {
     ESP_LOGI(TAG, "===========================================");
-    ESP_LOGI(TAG, "=== Http3Manager Shared Connection Test ===");
+    ESP_LOGI(TAG, "=== HTTP Client Download Speed Test ===");
     ESP_LOGI(TAG, "===========================================");
-    ESP_LOGI(TAG, "Target: %s:%u", hostname, port);
-    
-    // 1. 初始化 Http3Manager
-    auto& manager = Http3Manager::GetInstance();
-    
-    Http3ManagerConfig config;
-    config.hostname = hostname;
-    config.port = port;
-    config.connect_timeout_ms = 10000;
-    config.request_timeout_ms = 30000;
-    config.idle_timeout_ms = 120000;  // 2 minutes idle timeout
-    config.enable_debug = true;
-    
-    if (!manager.Init(config)) {
-        ESP_LOGE(TAG, "Failed to init Http3Manager");
+    ESP_LOGI(TAG, "URL: %s", url);
+
+    // Configure HTTP client
+    esp_http_client_config_t config = {};
+    config.url = url;
+    config.timeout_ms = 30000;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.buffer_size = 4096;
+    config.buffer_size_tx = 1024;
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == nullptr) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client");
         return;
     }
-    
-    manager.SetIdentifiers("test-device-12345", "test-client-001");
-    
-    // 2. 建立连接
-    ESP_LOGI(TAG, "Establishing QUIC connection...");
-    if (!manager.EnsureConnected(20000)) {
-        ESP_LOGE(TAG, "Failed to connect");
-        manager.Deinit();
+
+    // Open connection
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
         return;
     }
-    ESP_LOGI(TAG, "Connection established!");
-    
-    // =========================================
-    // 阶段1：测试并发请求
-    // =========================================
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "=========================================");
-    ESP_LOGI(TAG, "Phase 1: Testing Concurrent Requests");
-    ESP_LOGI(TAG, "=========================================");
-    
-    // 用于跟踪并发请求完成状态
-    SemaphoreHandle_t req1_sem = xSemaphoreCreateBinary();
-    SemaphoreHandle_t req2_sem = xSemaphoreCreateBinary();
-    int req1_status = 0, req2_status = 0;
-    std::string req1_body, req2_body;
-    
-    // 发送请求1: GET /
-    Http3Request req1;
-    req1.method = "GET";
-    req1.path = "/";
-    
-    Http3StreamCallbacks cb1;
-    cb1.on_headers = [&](int stream_id, int status, const auto& headers) {
-        ESP_LOGI(TAG, "[Stream %d] GET / - Status: %d", stream_id, status);
-        req1_status = status;
-    };
-    cb1.on_data = [&](int stream_id, const uint8_t* data, size_t len, bool fin) {
-        if (data && len > 0) {
-            req1_body.append(reinterpret_cast<const char*>(data), len);
-        }
-    };
-    cb1.on_complete = [&](int stream_id, bool success, const std::string& error) {
-        ESP_LOGI(TAG, "[Stream %d] GET / - Complete: %s", stream_id, success ? "OK" : error.c_str());
-        xSemaphoreGive(req1_sem);
-    };
-    
-    int stream1 = manager.OpenStream(req1, cb1);
-    if (stream1 >= 0) {
-        manager.FinishStream(stream1);  // No body for GET
-        ESP_LOGI(TAG, "Request 1 (GET /) sent on stream %d", stream1);
-    } else {
-        ESP_LOGE(TAG, "Failed to open stream for request 1");
-    }
-    
-    // 发送请求2: GET /pocket-sage/health
-    Http3Request req2;
-    req2.method = "GET";
-    req2.path = "/pocket-sage/health";
-    
-    Http3StreamCallbacks cb2;
-    cb2.on_headers = [&](int stream_id, int status, const auto& headers) {
-        ESP_LOGI(TAG, "[Stream %d] GET /health - Status: %d", stream_id, status);
-        req2_status = status;
-    };
-    cb2.on_data = [&](int stream_id, const uint8_t* data, size_t len, bool fin) {
-        if (data && len > 0) {
-            req2_body.append(reinterpret_cast<const char*>(data), len);
-        }
-    };
-    cb2.on_complete = [&](int stream_id, bool success, const std::string& error) {
-        ESP_LOGI(TAG, "[Stream %d] GET /health - Complete: %s", stream_id, success ? "OK" : error.c_str());
-        xSemaphoreGive(req2_sem);
-    };
-    
-    int stream2 = manager.OpenStream(req2, cb2);
-    if (stream2 >= 0) {
-        manager.FinishStream(stream2);  // No body for GET
-        ESP_LOGI(TAG, "Request 2 (GET /health) sent on stream %d", stream2);
-    } else {
-        ESP_LOGE(TAG, "Failed to open stream for request 2");
-    }
-    
-    // 等待两个请求完成
-    ESP_LOGI(TAG, "Waiting for concurrent responses...");
-    bool req1_done = xSemaphoreTake(req1_sem, pdMS_TO_TICKS(15000)) == pdTRUE;
-    bool req2_done = xSemaphoreTake(req2_sem, pdMS_TO_TICKS(15000)) == pdTRUE;
-    
-    vSemaphoreDelete(req1_sem);
-    vSemaphoreDelete(req2_sem);
-    
-    // 清理 stream
-    if (stream1 >= 0) manager.CleanupStream(stream1);
-    if (stream2 >= 0) manager.CleanupStream(stream2);
-    
-    // 打印并发请求结果
-    ESP_LOGI(TAG, "--- Concurrent Request Results ---");
-    ESP_LOGI(TAG, "Request 1 (GET /): %s, Status=%d", req1_done ? "Done" : "Timeout", req1_status);
-    ESP_LOGI(TAG, "Request 2 (GET /health): %s, Status=%d", req2_done ? "Done" : "Timeout", req2_status);
-    
-    if (!manager.IsConnected()) {
-        ESP_LOGE(TAG, "Connection lost, aborting test");
-        manager.Deinit();
+
+    // Fetch headers
+    int content_length = esp_http_client_fetch_headers(client);
+    int status_code = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "HTTP Status: %d, Content-Length: %d", status_code, content_length);
+
+    if (status_code != 200) {
+        ESP_LOGE(TAG, "HTTP request failed with status %d", status_code);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
         return;
     }
-    
-    // =========================================
-    // 阶段2：等待30秒
-    // =========================================
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "=========================================");
-    ESP_LOGI(TAG, "Phase 2: Waiting 30 seconds");
-    ESP_LOGI(TAG, "=========================================");
-    
-    for (int waited = 0; waited < 30 && manager.IsConnected(); waited += 5) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        ESP_LOGI(TAG, "  Waited %d seconds...", waited + 5);
-    }
-    
-    if (!manager.IsConnected()) {
-        ESP_LOGE(TAG, "Connection lost during wait, aborting test");
-        manager.Deinit();
+
+    // Allocate read buffer
+    static constexpr size_t kReadBufferSize = 8192;
+    uint8_t* buffer = static_cast<uint8_t*>(malloc(kReadBufferSize));
+    if (buffer == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate read buffer");
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
         return;
     }
-    
-    ESP_LOGI(TAG, "30 seconds wait complete, connection still alive");
-    
-    // =========================================
-    // 阶段3：测试 ChatStream
-    // =========================================
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "=========================================");
-    ESP_LOGI(TAG, "Phase 3: Testing ChatStream");
-    ESP_LOGI(TAG, "=========================================");
-    
-    const uint8_t* audio_data = GetTestOggData();
-    size_t audio_size = GetTestOggSize();
-    ESP_LOGI(TAG, "Audio file size: %zu bytes", audio_size);
-    
-    SemaphoreHandle_t chat_sem = xSemaphoreCreateBinary();
-    int chat_status = 0;
-    std::string chat_body;
-    bool chat_success = false;
-    
-    Http3Request chat_req;
-    chat_req.method = "POST";
-    chat_req.path = "/pocket-sage/chat/stream";
-    chat_req.headers = {
-        {"content-type", "application/octet-stream"},
-        {"x-audio-sample-rate", "16000"},
-        {"x-audio-channels", "1"},
-        {"x-audio-container", "ogg"},
-        {"accept", "text/plain"},
-    };
-    
-    Http3StreamCallbacks chat_cb;
-    chat_cb.on_headers = [&](int stream_id, int status, const auto& headers) {
-        ESP_LOGI(TAG, "[Stream %d] ChatStream - Status: %d", stream_id, status);
-        chat_status = status;
-    };
-    chat_cb.on_data = [&](int stream_id, const uint8_t* data, size_t len, bool fin) {
-        if (data && len > 0) {
-            std::string chunk(reinterpret_cast<const char*>(data), len);
-            chat_body.append(chunk);
-            // 实时打印流式响应
-            ESP_LOGI(TAG, "[ChatStream] %s", chunk.c_str());
+
+    // Start downloading and measure speed
+    int64_t start_time = esp_timer_get_time();
+    int64_t last_report_time = start_time;
+    size_t total_bytes = 0;
+    size_t bytes_since_last_report = 0;
+    int read_len;
+
+    ESP_LOGI(TAG, "Starting download...");
+
+    while ((read_len = esp_http_client_read(client, reinterpret_cast<char*>(buffer), kReadBufferSize)) > 0) {
+        total_bytes += read_len;
+        bytes_since_last_report += read_len;
+
+        int64_t now = esp_timer_get_time();
+        int64_t elapsed_since_report = now - last_report_time;
+
+        // Report every second
+        if (elapsed_since_report >= 1000000) {
+            float instant_speed_bytes_per_sec = (bytes_since_last_report * 1000000.0f) / elapsed_since_report;  // bytes/s
+            float overall_speed_bytes_per_sec = (total_bytes * 1000000.0f) / (now - start_time);  // bytes/s
+
+            ESP_LOGI(TAG, "Downloaded: %zu bytes (%.1f KB), Instant: %.1f KB/s (%.0f B/s), Average: %.1f KB/s (%.0f B/s)",
+                     total_bytes, total_bytes / 1024.0f, 
+                     instant_speed_bytes_per_sec / 1024.0f, instant_speed_bytes_per_sec,
+                     overall_speed_bytes_per_sec / 1024.0f, overall_speed_bytes_per_sec);
+
+            last_report_time = now;
+            bytes_since_last_report = 0;
         }
-    };
-    chat_cb.on_write_complete = [](int stream_id, size_t total_bytes) {
-        ESP_LOGI(TAG, "[Stream %d] Upload complete: %zu bytes", stream_id, total_bytes);
-    };
-    chat_cb.on_complete = [&](int stream_id, bool success, const std::string& error) {
-        ESP_LOGI(TAG, "[Stream %d] ChatStream - Complete: %s", stream_id, success ? "OK" : error.c_str());
-        chat_success = success;
-        xSemaphoreGive(chat_sem);
-    };
-    
-    int chat_stream = manager.OpenStream(chat_req, chat_cb);
-    if (chat_stream >= 0) {
-        ESP_LOGI(TAG, "ChatStream opened: stream %d", chat_stream);
-        
-        // 上传音频数据
-        ESP_LOGI(TAG, "Uploading audio data (%zu bytes)...", audio_size);
-        manager.QueueWrite(chat_stream, audio_data, audio_size);
-        manager.FinishStream(chat_stream);
-        
-        // 等待响应完成
-        ESP_LOGI(TAG, "Waiting for ChatStream response...");
-        if (xSemaphoreTake(chat_sem, pdMS_TO_TICKS(60000)) == pdTRUE) {
-            ESP_LOGI(TAG, "--- ChatStream Results ---");
-            ESP_LOGI(TAG, "Status: %d, Success: %s", chat_status, chat_success ? "Yes" : "No");
-        } else {
-            ESP_LOGW(TAG, "ChatStream timeout");
-        }
-        
-        manager.CleanupStream(chat_stream);
-    } else {
-        ESP_LOGE(TAG, "Failed to open ChatStream");
     }
-    
-    vSemaphoreDelete(chat_sem);
-    
-    // =========================================
-    // 阶段4：等待服务器关闭连接
-    // =========================================
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "=========================================");
-    ESP_LOGI(TAG, "Phase 4: Waiting for server to close");
-    ESP_LOGI(TAG, "=========================================");
-    ESP_LOGI(TAG, "Connection will stay open until server closes it (idle timeout: %u ms)", config.idle_timeout_ms);
-    
-    // 打印连接统计
-    auto stats = manager.GetStats();
-    ESP_LOGI(TAG, "=== Connection Stats ===");
-    ESP_LOGI(TAG, "  Packets sent: %lu", stats.packets_sent);
-    ESP_LOGI(TAG, "  Packets received: %lu", stats.packets_received);
-    ESP_LOGI(TAG, "  Bytes sent: %lu", stats.bytes_sent);
-    ESP_LOGI(TAG, "  Bytes received: %lu", stats.bytes_received);
-    ESP_LOGI(TAG, "  RTT: %lu ms", stats.rtt_ms);
-    
-    // 持续等待，直到断开连接
-    int idle_seconds = 0;
-    while (manager.IsConnected()) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
-        idle_seconds += 10;
-        ESP_LOGI(TAG, "  Connection alive, idle for %d seconds...", idle_seconds);
+
+    int64_t end_time = esp_timer_get_time();
+    float elapsed_sec = (end_time - start_time) / 1000000.0f;
+    float speed_bytes_per_sec = total_bytes / elapsed_sec;  // bytes/s
+    float speed_kb_per_sec = speed_bytes_per_sec / 1024.0f;  // KB/s
+    float speed_mb_per_sec = speed_bytes_per_sec / (1024.0f * 1024.0f);  // MB/s
+
+    ESP_LOGI(TAG, "===========================================");
+    ESP_LOGI(TAG, "=== Download Complete ===");
+    ESP_LOGI(TAG, "===========================================");
+    ESP_LOGI(TAG, "Total bytes: %zu (%.2f KB, %.2f MB)", total_bytes, total_bytes / 1024.0f, total_bytes / (1024.0f * 1024.0f));
+    ESP_LOGI(TAG, "Time elapsed: %.2f seconds", elapsed_sec);
+    ESP_LOGI(TAG, "Average speed: %.0f B/s (%.2f KB/s, %.2f MB/s)", speed_bytes_per_sec, speed_kb_per_sec, speed_mb_per_sec);
+
+    if (read_len < 0) {
+        ESP_LOGW(TAG, "Read error occurred at the end: %d", read_len);
     }
-    
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "=========================================");
-    ESP_LOGI(TAG, "=== Test Complete ===");
-    ESP_LOGI(TAG, "=========================================");
-    ESP_LOGI(TAG, "Connection closed by server after %d seconds idle", idle_seconds);
-    
-    manager.Deinit();
+
+    // Cleanup
+    free(buffer);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    ESP_LOGI(TAG, "HTTP download test completed");
 }
+
 
 
 extern "C" void app_main(void) {
@@ -519,15 +400,15 @@ extern "C" void app_main(void) {
         return;
     }
 
-    esp_pm_config_t pm_config = {
-        .max_freq_mhz = 240,
-        .min_freq_mhz = 80,
-        .light_sleep_enable = true,
-    };
-    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+    // esp_pm_config_t pm_config = {
+    //     .max_freq_mhz = 240,
+    //     .min_freq_mhz = 80,
+    //     .light_sleep_enable = true,
+    // };
+    // ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
     
-    // 共享连接测试
-    TestHttp3ManagerSharedConnection("api.tenclass.net", 443);
+    // HTTP 下载速度测试
+    TestHttpClientDownload("https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/firmwares/v1.9.4_xmini-c3/xiaozhi.bin");
     
 #endif
     

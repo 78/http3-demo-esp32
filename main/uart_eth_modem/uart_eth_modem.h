@@ -15,7 +15,6 @@
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_netif.h"
-#include "esp_pm.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
@@ -25,7 +24,7 @@
 #include "iot_eth_netif_glue.h"
 
 /**
-* @brief UART Ethernet Modem driver for 4G modules (EC801E, etc.)
+* @brief UART Ethernet Modem driver for 4G modules (EC801E, NT26K, etc.)
 *
 * This class encapsulates the UART-based Ethernet communication with 4G modules,
 * providing a simple interface for network connectivity. It handles:
@@ -40,65 +39,57 @@
 *   - After sending a frame, wait for receiver's 50us high pulse as ACK
 *   - Idle timeout triggers PendingIdle state, then Idle when both are high
 *
-* Usage:
-*   UartEthModem::Config config = { ... };
-*   UartEthModem modem(config);
-*   modem.Start();
-*   auto status = modem.WaitForNetworkReady();
-*   if (status == UartEthModem::NetworkStatus::Ready) {
-*       // Network is ready, use modem.GetNetif() for network operations
-*   }
-*   modem.Stop();
 */
 class UartEthModem {
 public:
     // Working state machine for low-power management
-    // 工作状态机：用于低功耗管理
     enum class WorkingState {
-        Idle,           // 空闲状态，双方都是高电平，可以休眠
-        Active,         // 工作状态，MRDY = low，正在通信
-        PendingIdle,    // 准备退出工作模式，MRDY = high，等待SRDY也变高
+        Idle,           // Both sides idle, DMA stopped
+        PendingActive,  // Master wants to send, waiting for slave to wake up (SRDY low)
+        Active,         // Active communication, DMA running
+        PendingIdle,    // Master idle, waiting for slave to idle (SRDY high)
+    };
+
+    // MRDY signal levels
+    enum class MrdyLevel {
+        Low,
+        High,
     };
 
     // Event types for the main task queue
-    // 主任务队列的事件类型
     enum class EventType : uint8_t {
         None = 0,
-        TxRequest,      // 有数据要发送（来自其他任务）
-        SrdyLow,        // SRDY 拉低（GPIO中断）: Slave要发数据或确认收到
-        SrdyHigh,       // SRDY 拉高（GPIO中断）: Slave确认或进入休眠
-        RxData,         // UHCI DMA 接收到数据（部分或完整帧）
-        TxDone,         // UHCI DMA 发送完成
-        Stop,           // 停止请求
+        TxRequest,
+        SrdyLow,
+        SrdyHigh,
+        RxData,
+        TxDone,
+        Stop,
     };
 
     // Event structure for the unified event queue
-    // 统一事件队列的事件结构
     struct Event {
         EventType type;
-        uint8_t* data;      // For RxData: pointer to received data
-        size_t size;        // For RxData: received size
-        bool is_complete;   // For RxData: whether this is a complete frame
+        UartUhci::RxBuffer* rx_buffer;  // For RxData events
     };
 
-    // Network status enumeration
-    enum class NetworkStatus {
-        Ready,             // Network ready, got IP address
-        LinkUp,            // Link layer connected, waiting for IP
-        LinkDown,          // Network link down
-        Searching,         // Searching for network (CEREG=2)
-        Error,             // General error state
-        NoSimCard,         // No SIM card inserted
-        RegistrationDenied, // Registration denied (CEREG=3)
-        NoCarrier          // No carrier signal
+    // Network event enumeration (aligned with NetworkModemEvent)
+    enum class UartEthModemEvent {
+        Connecting,              // Network is connecting/searching (LinkUp, Searching)
+        Connected,               // Network connected successfully (Ready, got IP address)
+        Disconnected,            // Network disconnected (LinkDown)
+        ErrorNoSim,              // No SIM card detected
+        ErrorRegistrationDenied, // Network registration denied (CEREG=3)
+        ErrorInitFailed,         // Modem initialization failed (general error)
+        ErrorNoCarrier,          // No carrier signal
     };
 
     // Cell information from CEREG
     struct CellInfo {
-        int stat = 0;         // Registration status (0-5)
-        std::string tac;      // Tracking Area Code
-        std::string ci;       // Cell ID
-        int act = 0;          // Access Technology (7=LTE, 9=NB-IoT, etc.)
+        int stat = 0;
+        std::string tac;
+        std::string ci;
+        int act = 0;
     };
 
     // Configuration
@@ -109,11 +100,10 @@ public:
         gpio_num_t rx_pin = GPIO_NUM_NC;
         gpio_num_t mrdy_pin = GPIO_NUM_NC;   // Master Ready (DTR, low=busy)
         gpio_num_t srdy_pin = GPIO_NUM_NC;   // Slave Ready (RI, low=busy)
-        size_t rx_buffer_size = 4096;
     };
 
     // Callback types
-    using NetworkStatusCallback = std::function<void(NetworkStatus status)>;
+    using UartEthModemEventCallback = std::function<void(UartEthModemEvent event)>;
 
     explicit UartEthModem(const Config& config);
     ~UartEthModem();
@@ -163,20 +153,12 @@ public:
     bool IsInitialized() const { return initialized_.load(); }
 
     /**
-     * @brief Wait for network to become ready
-     *
-     * @param timeout_ms Timeout in milliseconds (0 = wait forever)
-     * @return NetworkStatus indicating the result (Ready if successful)
-     */
-    NetworkStatus WaitForNetworkReady(uint32_t timeout_ms = 120000);
-
-    /**
-     * @brief Set callback for network status changes
+     * @brief Set callback for network event changes
      * 
      * This callback is only triggered when network is initialized.
-     * It reports link status changes (LinkUp/LinkDown).
+     * It reports network event changes.
      */
-    void SetNetworkStatusCallback(NetworkStatusCallback callback);
+    void SetNetworkEventCallback(UartEthModemEventCallback callback);
 
     /**
      * @brief Enable or disable debug logging
@@ -206,9 +188,9 @@ public:
     esp_netif_t* GetNetif() const { return eth_netif_; }
 
     /**
-     * @brief Get network status name for logging
+     * @brief Get network event name for logging
      */
-    static const char* GetNetworkStatusName(NetworkStatus status);
+    static const char* GetNetworkEventName(UartEthModemEvent event);
 
 private:
     // Frame type
@@ -288,28 +270,24 @@ private:
     void DeinitIotEth();
 
     // Task implementation (single task with UHCI DMA)
-    // 单任务架构：使用 UHCI DMA，收发都不阻塞
-    void MainTaskRun();         // 主任务：处理所有事件
+    void MainTaskRun();
     void InitTaskRun();
 
     // Event handling
-    // 事件处理
     void HandleEvent(const Event& event);
     void HandleSrdyLow();
     void HandleSrdyHigh();
-    void HandleRxData(uint8_t* data, size_t size, bool is_complete);
-    void HandleTxDone();
+    void HandleRxData(UartUhci::RxBuffer* buffer);
     void HandleIdleTimeout();
 
     // Working state machine
-    // 工作状态机控制
-    void EnterActiveState();    // 进入工作状态：获取pm_lock，拉低MRDY
-    void EnterPendingIdleState();  // 进入待退出状态：拉高MRDY
-    void EnterIdleState();      // 进入休眠状态：释放pm_lock
-    TickType_t CalculateNextTimeout();  // 计算下一次超时时间
+    void EnterPendingActiveState();  // Master initiates wakeup, wait for slave
+    void EnterActiveState();
+    void EnterPendingIdleState();
+    void EnterIdleState();
+    TickType_t CalculateNextTimeout();
 
     // UHCI DMA callbacks (called from ISR context, must be in IRAM)
-    // UHCI DMA 回调函数（在中断上下文中调用，必须放在 IRAM）
     static bool IRAM_ATTR UhciRxCallbackStatic(const UartUhci::RxEventData& data, void* user_data);
     static bool IRAM_ATTR UhciTxCallbackStatic(const UartUhci::TxDoneEventData& data, void* user_data);
 
@@ -333,17 +311,15 @@ private:
     void QueryModemInfo();
 
     // GPIO control (low level = busy)
-    // MRDY/SRDY 控制（低电平 = 忙）
-    void SetMrdy(bool low);     // 设置MRDY电平：true=低(busy)，false=高(idle)
-    bool IsSrdyLow();           // 检测SRDY是否为低
-    void SendAckPulse();        // 发送确认脉冲：MRDY高50us
-    bool WaitForSrdyAck(int64_t timeout_us);  // 等待SRDY确认脉冲
-    void ConfigureSrdyInterrupt(bool for_wakeup);  // 配置SRDY中断类型
+    void SetMrdy(MrdyLevel level);
+    bool IsSrdyLow();
+    void SendAckPulse();
+    bool WaitForSrdyAck(int64_t timeout_us);
+    void ConfigureSrdyInterrupt(bool for_wakeup);
     static void IRAM_ATTR SrdyIsrHandler(void* arg);
 
     // State management
-    void SetInitialized(bool initialized);
-    void SetNetworkStatus(NetworkStatus status);
+    void SetNetworkEvent(UartEthModemEvent event);
 
     // Resource cleanup
     void CleanupResources(bool cleanup_iot_eth = true);
@@ -358,39 +334,46 @@ private:
     // Network initialization flag (atomic for thread safety)
     std::atomic<bool> initialized_{false};
     
-    // Network status (atomic for thread safety)
-    std::atomic<NetworkStatus> network_status_{NetworkStatus::LinkDown};
+    // Network event (atomic for thread safety)
+    std::atomic<UartEthModemEvent> network_event_{UartEthModemEvent::Disconnected};
 
     // Synchronization primitives
-    QueueHandle_t event_queue_ = nullptr;       // 统一事件队列
+    QueueHandle_t event_queue_ = nullptr;
     std::mutex at_mutex_;
+    std::mutex send_mutex_;
     SemaphoreHandle_t at_command_response_semaphore_ = nullptr;
     EventGroupHandle_t event_group_ = nullptr;
-    esp_pm_lock_handle_t pm_lock_handle_ = nullptr;
 
     // UHCI DMA
     UartUhci uart_uhci_;
-    uint8_t* rx_buffer_ = nullptr;              // DMA 接收缓冲区
+    
+    // Frame reassembly buffer for incomplete frames
+    // 用于不完整帧的重组缓冲区
+    static constexpr size_t kMaxFrameSize = 1600;
+    static constexpr size_t kRxBufferCount = 4;
+    static constexpr size_t kRxBufferSize = 1600;
+    uint8_t* reassembly_buffer_ = nullptr;
+    size_t reassembly_size_ = 0;
+    size_t reassembly_expected_ = 0;  // Expected total frame size (header + payload)
 
     // Task handles
-    TaskHandle_t main_task_ = nullptr;          // 主任务
+    TaskHandle_t main_task_ = nullptr;
     TaskHandle_t init_task_ = nullptr;
 
     // State flags (atomic for thread safety)
     std::atomic<bool> stop_flag_{false};
-    std::atomic<bool> connected_{false};
+    std::atomic<bool> handshake_done_{false};
     std::atomic<bool> initializing_{false};
     std::atomic<uint8_t> seq_no_{0};
     std::atomic<bool> debug_enabled_{false};
 
     // Working state machine
-    // 工作状态机相关
     std::atomic<WorkingState> working_state_{WorkingState::Idle};
-    std::atomic<bool> mrdy_is_low_{false};      // MRDY当前是否为低（busy）
-    int64_t last_activity_time_us_{0};          // 最后一次活动时间（us）
-    static constexpr int64_t kIdleTimeoutUs = 1000 * 1000;  // 1秒无活动后进入PendingIdle
-    static constexpr int64_t kAckTimeoutUs = 20 * 1000;     // 等待ACK超时20ms
-    static constexpr int64_t kAckPulseUs = 50;              // ACK脉冲宽度50us
+    std::atomic<bool> mrdy_is_low_{false};
+    int64_t last_activity_time_us_{0};
+    static constexpr int64_t kIdleTimeoutUs = 300 * 1000;
+    static constexpr int64_t kAckTimeoutUs = 100 * 1000;
+    static constexpr int64_t kAckPulseUs = 50;
 
     // Modem information (cached)
     std::string imei_;
@@ -406,7 +389,7 @@ private:
     bool waiting_for_at_response_ = false;
 
     // Callback
-    NetworkStatusCallback network_status_callback_;
+    UartEthModemEventCallback network_event_callback_;
 
     // iot_eth related
     iot_eth_driver_t driver_{};
@@ -418,12 +401,15 @@ private:
 
     // Event bits
     static constexpr uint32_t kEventStart = (1 << 0);
-    static constexpr uint32_t kEventConnected = (1 << 1);
+    static constexpr uint32_t kEventHandshakeDone = (1 << 1);
     static constexpr uint32_t kEventStop = (1 << 2);
     static constexpr uint32_t kEventNetworkReady = (1 << 3);
     static constexpr uint32_t kEventAtResponse = (1 << 4);
     static constexpr uint32_t kEventInitDone = (1 << 5);
-    static constexpr uint32_t kEventNetworkStatusChanged = (1 << 6);
+    static constexpr uint32_t kEventNetworkEventChanged = (1 << 6);
+    static constexpr uint32_t kEventSrdyHigh = (1 << 7);
+    static constexpr uint32_t kEventTxDone = (1 << 9);
+    static constexpr uint32_t kEventActiveState = (1 << 11);  // Set when entered active state with DMA ready
 
     static constexpr uint32_t kEventMainTaskDone = (1 << 8);
     static constexpr uint32_t kEventInitTaskDone = (1 << 10);
@@ -435,6 +421,10 @@ private:
     static constexpr uint32_t kHandshakeTimeoutMs = 5000;
     static constexpr uint32_t kAtDefaultTimeoutMs = 1000;
     static constexpr uint32_t kEnterLowPowerTimeoutS = 5;
+
+    // SRDY interrupt configuration constants
+    static constexpr bool kSrdyInterruptForWakeup = true;   // Low level trigger for light sleep wakeup
+    static constexpr bool kSrdyInterruptForAck = false;    // Edge detection for SRDY high (ACK)
 
     // Handshake magic bytes
     static constexpr uint8_t kHandshakeRequest[] = {

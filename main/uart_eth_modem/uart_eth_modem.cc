@@ -28,13 +28,6 @@ UartEthModem::UartEthModem(const Config& config) : config_(config) {
         abort();  // Constructor cannot fail gracefully
     }
 
-    // Create PM lock handle for CPU frequency control
-    esp_err_t ret = esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "modem", &pm_lock_handle_);
-    if (ret != ESP_OK) {
-        ESP_LOGE(kTag, "Failed to create PM lock: %s", esp_err_to_name(ret));
-        abort();  // Constructor cannot fail gracefully
-    }
-
     // Initialize driver structure
     driver_.name = "uart_eth";
     driver_.init = [](iot_eth_driver_t* driver) -> esp_err_t {
@@ -56,7 +49,7 @@ UartEthModem::UartEthModem(const Config& config) : config_(config) {
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
         auto* self = reinterpret_cast<UartEthModem*>(reinterpret_cast<char*>(driver) - offsetof(UartEthModem, driver_));
 #pragma GCC diagnostic pop
-        if (!self->connected_.load()) {
+        if (!self->handshake_done_.load()) {
             return ESP_ERR_INVALID_STATE;
         }
         return self->SendFrame(buf, len, FrameType::kEthernet);
@@ -83,10 +76,6 @@ UartEthModem::~UartEthModem() {
     Stop();
 
     // Cleanup resources created in constructor
-    if (pm_lock_handle_) {
-        esp_pm_lock_delete(pm_lock_handle_);
-        pm_lock_handle_ = nullptr;
-    }
     if (event_group_) {
         vEventGroupDelete(event_group_);
         event_group_ = nullptr;
@@ -102,11 +91,10 @@ esp_err_t UartEthModem::Start() {
     }
 
     stop_flag_ = false;
-    connected_ = false;
+    handshake_done_ = false;
     initializing_ = true;
 
     // Create event queue FIRST (before GPIO init, since ISR uses it)
-    // 首先创建事件队列（在 GPIO 初始化之前，因为 ISR 会使用它）
     event_queue_ = xQueueCreate(32, sizeof(Event));
     if (!event_queue_) {
         ESP_LOGE(kTag, "Failed to create event queue");
@@ -140,33 +128,36 @@ esp_err_t UartEthModem::Start() {
         return ESP_ERR_NO_MEM;
     }
 
-    // Allocate DMA receive buffer
-    // 分配 DMA 接收缓冲区
-    rx_buffer_ = static_cast<uint8_t*>(heap_caps_malloc(config_.rx_buffer_size, MALLOC_CAP_DMA));
-    if (!rx_buffer_) {
-        ESP_LOGE(kTag, "Failed to allocate DMA buffer");
+    // Allocate frame reassembly buffer
+    reassembly_buffer_ = static_cast<uint8_t*>(heap_caps_malloc(kMaxFrameSize, MALLOC_CAP_INTERNAL));
+    if (!reassembly_buffer_) {
+        ESP_LOGE(kTag, "Failed to allocate reassembly buffer");
         vSemaphoreDelete(at_command_response_semaphore_);
         vQueueDelete(event_queue_);
         DeinitGpio();
         DeinitUart();
         return ESP_ERR_NO_MEM;
     }
+    reassembly_size_ = 0;
+    reassembly_expected_ = 0;
 
-    // Initialize UART UHCI DMA controller
-    // 初始化 UART UHCI DMA 控制器
+    // Initialize UART UHCI DMA controller with buffer pool
     UartUhci::Config uhci_cfg = {
         .uart_port = config_.uart_num,
-        .tx_queue_depth = 10,
-        .max_tx_size = config_.rx_buffer_size,
-        .max_rx_buffer_size = config_.rx_buffer_size,
+        .tx_queue_depth = 1,  // Only 1 TX at a time since we wait for ACK
+        .max_tx_size = kMaxFrameSize,
         .dma_burst_size = 32,
-        .idle_eof = true,  // Trigger EOF when UART line becomes idle (frame end)
+        .rx_pool = {
+            .buffer_count = kRxBufferCount,
+            .buffer_size = kRxBufferSize,
+        },
     };
 
     ret = uart_uhci_.Init(uhci_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "Failed to init UHCI: %s", esp_err_to_name(ret));
-        free(rx_buffer_);
+        free(reassembly_buffer_);
+        reassembly_buffer_ = nullptr;
         vSemaphoreDelete(at_command_response_semaphore_);
         vQueueDelete(event_queue_);
         DeinitGpio();
@@ -175,19 +166,17 @@ esp_err_t UartEthModem::Start() {
     }
 
     // Register UHCI callbacks
-    // 注册 UHCI 回调函数
     uart_uhci_.SetRxCallback(UhciRxCallbackStatic, this);
     uart_uhci_.SetTxDoneCallback(UhciTxCallbackStatic, this);
 
     // Note: Don't start DMA receive here, will be started when entering Active state
-    // 注意：不在这里启动 DMA 接收，将在进入 Active 状态时启动（避免持有 uhci 的 NO_LIGHT_SLEEP 锁）
 
     // Create main task (handles all events, no blocking operations)
-    // 创建主任务（处理所有事件，无阻塞操作）
+    // Priority 10 is high enough for UART handling but not too high to cause WDT issues
     xTaskCreate([](void* arg) {
         static_cast<UartEthModem*>(arg)->MainTaskRun();
         vTaskDelete(nullptr);
-    }, "uart_eth_main", 4096, this, configMAX_PRIORITIES - 1, &main_task_);
+    }, "uart_eth_main", 4096, this, 10, &main_task_);
     
     // Create init task
     xTaskCreate([](void* arg) {
@@ -200,7 +189,8 @@ esp_err_t UartEthModem::Start() {
         stop_flag_ = true;
         vTaskDelay(pdMS_TO_TICKS(100));
         uart_uhci_.Deinit();
-        free(rx_buffer_);
+        free(reassembly_buffer_);
+        reassembly_buffer_ = nullptr;
         vSemaphoreDelete(at_command_response_semaphore_);
         vQueueDelete(event_queue_);
         DeinitGpio();
@@ -208,26 +198,12 @@ esp_err_t UartEthModem::Start() {
         return ESP_ERR_NO_MEM;
     }
 
-    // Signal start
+    // Signal start (initialization continues asynchronously in InitTaskRun)
+    // Failure will be notified via event callback (ErrorInitFailed, ErrorNoSim, etc.)
+    // Caller should call Stop() after receiving failure event to cleanup resources
     xEventGroupSetBits(event_group_, kEventStart);
 
-    // Wait for initialization to complete
-    auto bits = xEventGroupWaitBits(event_group_, kEventInitDone | kEventStop, pdFALSE, pdFALSE, pdMS_TO_TICKS(180000));
-    if (bits & kEventStop) {
-        ESP_LOGE(kTag, "Initialization failed");
-        // Cleanup: wait for tasks to exit and cleanup resources
-        stop_flag_ = true;
-        initializing_ = false;
-        xEventGroupSetBits(event_group_, kEventStop);
-        xEventGroupWaitBits(event_group_, kEventAllTasksDone, pdTRUE, pdTRUE, pdMS_TO_TICKS(3000));
-        
-        // Cleanup resources (iot_eth not initialized yet, so skip it)
-        CleanupResources(false);
-        return ESP_FAIL;
-    }
-
-    initializing_ = false;
-    ESP_LOGI(kTag, "UartEthModem started successfully");
+    ESP_LOGI(kTag, "UartEthModem starting asynchronously...");
     return ESP_OK;
 }
 
@@ -252,7 +228,7 @@ esp_err_t UartEthModem::Stop() {
     // Cleanup all resources including iot_eth
     CleanupResources(true);
 
-    SetInitialized(false);
+    initialized_ = false;
 
     ESP_LOGI(kTag, "UartEthModem stopped");
     return ESP_OK;
@@ -262,7 +238,7 @@ esp_err_t UartEthModem::SendAt(const std::string& cmd, std::string& response, ui
     std::lock_guard<std::mutex> lock(at_mutex_);
 
     // Allow AT commands during initialization even if not connected
-    if (!connected_.load() && !initializing_.load() && !initialized_.load()) {
+    if (!handshake_done_.load() && !initializing_.load() && !initialized_.load()) {
         ESP_LOGE(kTag, "Failed to send AT command: not initialized");
         return ESP_ERR_INVALID_STATE;
     }
@@ -277,15 +253,15 @@ esp_err_t UartEthModem::SendAt(const std::string& cmd, std::string& response, ui
         cmd_with_cr += '\r';
     }
 
+    if (debug_enabled_.load()) {
+        ESP_LOGI(kTag, "AT>>> %s", cmd.c_str());
+    }
+
     // Send AT command frame
     esp_err_t ret = SendFrame(reinterpret_cast<const uint8_t*>(cmd_with_cr.c_str()), cmd_with_cr.size(), FrameType::kAtCommand);
     if (ret != ESP_OK) {
         waiting_for_at_response_ = false;
         return ret;
-    }
-
-    if (debug_enabled_.load()) {
-        ESP_LOGI(kTag, "AT>>> %s", cmd.c_str());
     }
 
     // Wait for response
@@ -308,24 +284,8 @@ esp_err_t UartEthModem::SendAt(const std::string& cmd, std::string& response, ui
     return ESP_OK;
 }
 
-UartEthModem::NetworkStatus UartEthModem::WaitForNetworkReady(uint32_t timeout_ms) {
-    if (initialized_.load() && network_status_.load() == NetworkStatus::Ready) {
-        return NetworkStatus::Ready;
-    }
-
-    TickType_t wait_time = (timeout_ms == 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-    auto bits = xEventGroupWaitBits(event_group_, kEventNetworkReady | kEventStop, pdFALSE, pdFALSE, wait_time);
-    
-    if (bits & kEventNetworkReady) {
-        return network_status_.load();
-    }
-    
-    // Timeout or stopped, return current status
-    return network_status_.load();
-}
-
-void UartEthModem::SetNetworkStatusCallback(NetworkStatusCallback callback) {
-    network_status_callback_ = std::move(callback);
+void UartEthModem::SetNetworkEventCallback(UartEthModemEventCallback callback) {
+    network_event_callback_ = std::move(callback);
 }
 
 void UartEthModem::SetDebug(bool enabled) {
@@ -417,16 +377,15 @@ UartEthModem::CellInfo UartEthModem::GetCellInfo() {
     return cell_info_;
 }
 
-const char* UartEthModem::GetNetworkStatusName(NetworkStatus status) {
-    switch (status) {
-        case NetworkStatus::Ready: return "Ready";
-        case NetworkStatus::LinkUp: return "LinkUp";
-        case NetworkStatus::LinkDown: return "LinkDown";
-        case NetworkStatus::Searching: return "Searching";
-        case NetworkStatus::Error: return "Error";
-        case NetworkStatus::NoSimCard: return "NoSimCard";
-        case NetworkStatus::RegistrationDenied: return "RegistrationDenied";
-        case NetworkStatus::NoCarrier: return "NoCarrier";
+const char* UartEthModem::GetNetworkEventName(UartEthModemEvent event) {
+    switch (event) {
+        case UartEthModemEvent::Connecting: return "Connecting";
+        case UartEthModemEvent::Connected: return "Connected";
+        case UartEthModemEvent::Disconnected: return "Disconnected";
+        case UartEthModemEvent::ErrorNoSim: return "ErrorNoSim";
+        case UartEthModemEvent::ErrorRegistrationDenied: return "ErrorRegistrationDenied";
+        case UartEthModemEvent::ErrorInitFailed: return "ErrorInitFailed";
+        case UartEthModemEvent::ErrorNoCarrier: return "ErrorNoCarrier";
         default: return "Unknown";
     }
 }
@@ -434,7 +393,6 @@ const char* UartEthModem::GetNetworkStatusName(NetworkStatus status) {
 // Private methods
 
 esp_err_t UartEthModem::InitUart() {
-    // UHCI DMA 模式：只配置 UART 参数，不安装驱动（UHCI 会接管）
     // UHCI DMA mode: only configure UART params, don't install driver (UHCI takes over)
     uart_config_t uart_config = {
         .baud_rate = config_.baud_rate,
@@ -459,7 +417,6 @@ esp_err_t UartEthModem::InitUart() {
 
 esp_err_t UartEthModem::InitGpio() {
     // MRDY pin (output) - Master Ready/Busy
-    // 初始化为高电平（空闲状态）
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << config_.mrdy_pin),
         .mode = GPIO_MODE_OUTPUT,
@@ -482,7 +439,6 @@ esp_err_t UartEthModem::InitGpio() {
     ESP_RETURN_ON_ERROR(ret, kTag, "Failed to configure SRDY pin");
 
     // Enable GPIO wakeup on low level (for light sleep)
-    // 启用低电平唤醒（用于轻度睡眠）
     ret = gpio_wakeup_enable(config_.srdy_pin, GPIO_INTR_LOW_LEVEL);
     ESP_RETURN_ON_ERROR(ret, kTag, "Failed to enable GPIO wakeup");
 
@@ -491,8 +447,7 @@ esp_err_t UartEthModem::InitGpio() {
     ESP_RETURN_ON_ERROR(ret, kTag, "Failed to add ISR handler");
 
     // Initially configure for wakeup (low level trigger)
-    // 初始配置为唤醒模式（低电平触发）
-    ConfigureSrdyInterrupt(true);
+    ConfigureSrdyInterrupt(kSrdyInterruptForWakeup);
 
     return ESP_OK;
 }
@@ -508,8 +463,12 @@ esp_err_t UartEthModem::InitIotEth() {
     esp_err_t ret = iot_eth_install(&eth_cfg, &eth_handle_);
     ESP_RETURN_ON_ERROR(ret, kTag, "Failed to install iot_eth driver");
 
-    // Create netif
+    // Create netif with GARP disabled
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
+    // Copy base config to modify flags (original is const)
+    esp_netif_inherent_config_t base_cfg = *netif_cfg.base;
+    base_cfg.flags = static_cast<esp_netif_flags_t>(base_cfg.flags & ~ESP_NETIF_FLAG_GARP);
+    netif_cfg.base = &base_cfg;
     eth_netif_ = esp_netif_new(&netif_cfg);
     if (!eth_netif_) {
         ESP_LOGE(kTag, "Failed to create netif");
@@ -574,8 +533,7 @@ esp_err_t UartEthModem::InitIotEth() {
 }
 
 void UartEthModem::DeinitUart() {
-    // UHCI 模式下，UART 没有安装驱动，无需删除
-    // In UHCI mode, UART driver is not installed, nothing to delete
+    // UHCI mode: UART driver is not installed, nothing to delete
 }
 
 void UartEthModem::DeinitGpio() {
@@ -606,19 +564,16 @@ void UartEthModem::DeinitIotEth() {
     }
 }
 
-// 主任务：处理所有事件（使用 UHCI DMA，收发都不阻塞）
 // Main task: handles all events (using UHCI DMA, no blocking I/O)
 void UartEthModem::MainTaskRun() {
-    ESP_LOGI(kTag, "Main task started (UHCI DMA mode)");
+    ESP_LOGD(kTag, "Main task started (UHCI DMA mode)");
 
     // Initialize MRDY to high (not busy, allow slave to sleep)
-    // 初始化 MRDY 为高电平（空闲）
-    SetMrdy(false);
+    SetMrdy(MrdyLevel::High);
     working_state_.store(WorkingState::Idle);
 
     while (!stop_flag_.load()) {
         // Calculate next timeout based on current state
-        // 根据当前状态计算下一次超时时间
         TickType_t wait_ticks = CalculateNextTimeout();
 
         Event event;
@@ -626,7 +581,6 @@ void UartEthModem::MainTaskRun() {
             HandleEvent(event);
         } else {
             // Timeout occurred
-            // 发生超时
             HandleIdleTimeout();
         }
     }
@@ -636,23 +590,19 @@ void UartEthModem::MainTaskRun() {
         EnterIdleState();
     }
 
-    ESP_LOGI(kTag, "Main task exiting");
+    ESP_LOGD(kTag, "Main task exiting");
     xEventGroupSetBits(event_group_, kEventMainTaskDone);
 }
 
-// UHCI RX 回调静态包装器（在中断上下文中调用）
 // UHCI RX callback static wrapper (called from ISR context)
 bool IRAM_ATTR UartEthModem::UhciRxCallbackStatic(const UartUhci::RxEventData& data, void* user_data) {
     auto* self = static_cast<UartEthModem*>(user_data);
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
-    // Send RxData event to main task
-    // 发送 RxData 事件到主任务
+    // Send RxData event to main task with buffer pointer
     Event event = {
         .type = EventType::RxData,
-        .data = data.data,
-        .size = data.recv_size,
-        .is_complete = data.is_complete,
+        .rx_buffer = data.buffer,
     };
 
     xQueueSendFromISR(self->event_queue_, &event, &xHigherPriorityTaskWoken);
@@ -660,61 +610,50 @@ bool IRAM_ATTR UartEthModem::UhciRxCallbackStatic(const UartUhci::RxEventData& d
     return xHigherPriorityTaskWoken == pdTRUE;
 }
 
-// UHCI TX 回调静态包装器（在中断上下文中调用）
 // UHCI TX callback static wrapper (called from ISR context)
 bool IRAM_ATTR UartEthModem::UhciTxCallbackStatic(const UartUhci::TxDoneEventData& data, void* user_data) {
     auto* self = static_cast<UartEthModem*>(user_data);
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
-    // Send TxDone event to main task
-    // 发送 TxDone 事件到主任务
-    Event event = {
-        .type = EventType::TxDone,
-        .data = nullptr,
-        .size = 0,
-        .is_complete = true,
-    };
-
-    xQueueSendFromISR(self->event_queue_, &event, &xHigherPriorityTaskWoken);
+    // Set TX done event bit (can be called from ISR context)
+    xEventGroupSetBitsFromISR(self->event_group_, kEventTxDone, &xHigherPriorityTaskWoken);
 
     return xHigherPriorityTaskWoken == pdTRUE;
 }
 
-// 启动下一次 DMA 接收
-// Start next DMA receive
+// Start continuous DMA receive using buffer pool
 void UartEthModem::StartDmaReceive() {
-    // Only start new DMA receive if in Active or PendingIdle state
+    // Only start DMA receive if in Active or PendingIdle state
     // In Idle state, don't start receive to release UHCI's NO_LIGHT_SLEEP lock
-    // 只有在 Active 或 PendingIdle 状态才启动新的 DMA 接收
-    // Idle 状态不启动接收，以释放 UHCI 的 NO_LIGHT_SLEEP 锁
     WorkingState state = working_state_.load();
     if (state == WorkingState::Idle) {
         ESP_LOGD(kTag, "Skipping DMA receive in idle state");
         return;
     }
 
-    // Start new DMA receive with buffer
-    // 启动新的 DMA 接收
-    esp_err_t ret = uart_uhci_.StartReceive(rx_buffer_, config_.rx_buffer_size);
+    // Start continuous receive with buffer pool
+    esp_err_t ret = uart_uhci_.StartReceive();
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "Failed to start DMA receive: %s", esp_err_to_name(ret));
     }
 }
 
-// 计算下一次超时时间
 // Calculate next timeout based on current working state
 TickType_t UartEthModem::CalculateNextTimeout() {
     WorkingState state = working_state_.load();
 
     if (state == WorkingState::Idle) {
         // In idle state, wait indefinitely for events
-        // 空闲状态：无限等待事件
         return portMAX_DELAY;
+    }
+
+    if (state == WorkingState::PendingActive) {
+        // In pending active state, wait for SRDY low with timeout
+        return pdMS_TO_TICKS(50);  // 50ms timeout for slave wakeup
     }
 
     if (state == WorkingState::Active) {
         // In active state, calculate remaining time until idle timeout
-        // 工作状态：计算距离超时的剩余时间
         int64_t now_us = esp_timer_get_time();
         int64_t elapsed_us = now_us - last_activity_time_us_;
         int64_t remaining_us = kIdleTimeoutUs - elapsed_us;
@@ -727,24 +666,30 @@ TickType_t UartEthModem::CalculateNextTimeout() {
 
     if (state == WorkingState::PendingIdle) {
         // In pending idle state, check SRDY periodically
-        // 待退出状态：定期检查 SRDY
         return pdMS_TO_TICKS(10);  // Check every 10ms
     }
 
     return portMAX_DELAY;
 }
 
-// 处理事件
 // Handle incoming event
 void UartEthModem::HandleEvent(const Event& event) {
     switch (event.type) {
-        case EventType::TxRequest:
-            // 进入工作状态以准备发送
-            // Enter active state to prepare for sending
-            if (working_state_.load() != WorkingState::Active) {
-                EnterActiveState();
+        case EventType::TxRequest: {
+            // Master wants to send data
+            WorkingState state = working_state_.load();
+            if (state == WorkingState::Idle || state == WorkingState::PendingIdle) {
+                // Need to wake up slave first (or ensure slave stays awake)
+                // Always go through PendingActive to avoid race condition:
+                // In PendingIdle, MRDY is high. Even if SRDY is low now,
+                // slave could see MRDY high and start sleeping before we
+                // call EnterActiveState(). So always set MRDY low first,
+                // then wait for SRDY low confirmation.
+                EnterPendingActiveState();
             }
+            // If already Active or PendingActive, nothing to do
             break;
+        }
 
         case EventType::SrdyLow:
             HandleSrdyLow();
@@ -755,11 +700,7 @@ void UartEthModem::HandleEvent(const Event& event) {
             break;
 
         case EventType::RxData:
-            HandleRxData(event.data, event.size, event.is_complete);
-            break;
-
-        case EventType::TxDone:
-            HandleTxDone();
+            HandleRxData(event.rx_buffer);
             break;
 
         case EventType::Stop:
@@ -771,99 +712,205 @@ void UartEthModem::HandleEvent(const Event& event) {
     }
 }
 
-// 处理 DMA 接收到的数据
-// Handle data received via DMA
-void UartEthModem::HandleRxData(uint8_t* data, size_t size, bool is_complete) {
+// Handle data received via DMA buffer pool
+void UartEthModem::HandleRxData(UartUhci::RxBuffer* buffer) {
+    if (!buffer || buffer->size == 0) {
+        if (buffer) {
+            uart_uhci_.ReturnBuffer(buffer);
+        }
+        return;
+    }
+
     // Ensure we're in active state
     if (working_state_.load() != WorkingState::Active) {
         EnterActiveState();
     }
 
-    // Process received frame
-    ProcessReceivedFrame(data, size);
-
     // Update activity time
     last_activity_time_us_ = esp_timer_get_time();
 
-    // If this was a complete frame (idle detected), start next receive
-    // 如果这是完整帧（检测到空闲），启动下一次接收
-    if (is_complete) {
-        // Send ACK pulse to slave
+    uint8_t* data = buffer->data;
+    size_t size = buffer->size;
+    size_t offset = 0;
+
+    // Process data, potentially multiple frames or partial frames
+    while (offset < size) {
+        if (reassembly_size_ == 0) {
+            // Not currently reassembling, look for new frame header
+            size_t remaining = size - offset;
+            
+            if (remaining < sizeof(FrameHeader)) {
+                // Not enough data for header, copy to reassembly buffer
+                memcpy(reassembly_buffer_, data + offset, remaining);
+                reassembly_size_ = remaining;
+                reassembly_expected_ = 0;  // Don't know expected size yet
+                break;
+            }
+
+            // Parse header
+            FrameHeader* header = reinterpret_cast<FrameHeader*>(data + offset);
+            if (!header->ValidateChecksum()) {
+                // Invalid header - likely end of valid data or corruption
+                // Don't scan further, just discard remaining data
+                if (debug_enabled_.load()) {
+                    ESP_LOGI(kTag, "Invalid checksum at offset %d, discarding %d remaining bytes",
+                             offset, size - offset);
+                }
+                break;
+            }
+
+            uint16_t payload_len = header->GetPayloadLength();
+            size_t frame_size = sizeof(FrameHeader) + payload_len;
+
+            if (frame_size > kMaxFrameSize) {
+                ESP_LOGW(kTag, "Frame too large: %d bytes", frame_size);
+                offset++;
+                continue;
+            }
+
+            if (remaining >= frame_size) {
+                // Complete frame available, process directly
+                ProcessReceivedFrame(data + offset, frame_size);
+                offset += frame_size;
+                
+                // Send ACK after processing complete frame
         SendAckPulse();
+            } else {
+                // Partial frame, copy to reassembly buffer
+                memcpy(reassembly_buffer_, data + offset, remaining);
+                reassembly_size_ = remaining;
+                reassembly_expected_ = frame_size;
+                break;
+            }
+        } else {
+            // Currently reassembling a frame
+            size_t remaining = size - offset;
+            
+            if (reassembly_expected_ == 0) {
+                // Still need to determine frame size (was missing header bytes)
+                size_t need_for_header = sizeof(FrameHeader) - reassembly_size_;
+                size_t copy_size = std::min(remaining, need_for_header);
+                memcpy(reassembly_buffer_ + reassembly_size_, data + offset, copy_size);
+                reassembly_size_ += copy_size;
+                offset += copy_size;
 
-        // Start next DMA receive
-        StartDmaReceive();
+                if (reassembly_size_ >= sizeof(FrameHeader)) {
+                    // Now we have the header
+                    FrameHeader* header = reinterpret_cast<FrameHeader*>(reassembly_buffer_);
+                    if (!header->ValidateChecksum()) {
+                        if (debug_enabled_.load()) {
+                            ESP_LOGI(kTag, "Invalid reassembled header checksum, discarding");
+                        }
+                        reassembly_size_ = 0;
+                        reassembly_expected_ = 0;
+                        break;  // Stop processing this buffer
+                    }
+                    uint16_t payload_len = header->GetPayloadLength();
+                    reassembly_expected_ = sizeof(FrameHeader) + payload_len;
+
+                    if (reassembly_expected_ > kMaxFrameSize) {
+                        ESP_LOGW(kTag, "Reassembled frame too large: %d bytes", reassembly_expected_);
+                        reassembly_size_ = 0;
+                        reassembly_expected_ = 0;
+                        continue;
+                    }
+                }
+                continue;
+            }
+
+            // We know the expected size, continue collecting data
+            size_t need = reassembly_expected_ - reassembly_size_;
+            size_t copy_size = std::min(remaining, need);
+            
+            if (reassembly_size_ + copy_size > kMaxFrameSize) {
+                ESP_LOGW(kTag, "Reassembly buffer overflow");
+                reassembly_size_ = 0;
+                reassembly_expected_ = 0;
+                break;
+            }
+
+            memcpy(reassembly_buffer_ + reassembly_size_, data + offset, copy_size);
+            reassembly_size_ += copy_size;
+            offset += copy_size;
+
+            if (reassembly_size_ >= reassembly_expected_) {
+                // Frame complete, process it
+                ProcessReceivedFrame(reassembly_buffer_, reassembly_expected_);
+                reassembly_size_ = 0;
+                reassembly_expected_ = 0;
+                
+                // Send ACK after processing complete frame
+                SendAckPulse();
     }
-}
-
-// 处理 DMA 发送完成
-// Handle DMA transmit completion
-void UartEthModem::HandleTxDone() {
-    if (debug_enabled_.load()) {
-        ESP_LOGI(kTag, "TX done");
-    }
-
-    // Update activity time
-    last_activity_time_us_ = esp_timer_get_time();
-
-    // Wait for slave ACK using polling (very short, 50us pulse)
-    // 使用轮询等待 slave 确认（很短，50us 脉冲）
-    if (!WaitForSrdyAck(kAckTimeoutUs)) {
-        if (debug_enabled_.load()) {
-            ESP_LOGW(kTag, "Slave ACK timeout");
         }
     }
+
+    // Return buffer to pool
+    uart_uhci_.ReturnBuffer(buffer);
 }
 
-// 处理 SRDY 拉低事件（Slave 要发数据或唤醒）
-// Handle SRDY low event: Slave wants to send data or waking up
+// Handle SRDY low event: Slave wants to send data or is ready to receive
 void UartEthModem::HandleSrdyLow() {
     WorkingState state = working_state_.load();
 
-    if (state == WorkingState::Idle || state == WorkingState::PendingIdle) {
-        // Slave is waking us up, enter active state
-        // Slave 正在唤醒我们，进入工作状态
-        ESP_LOGI(kTag, "Slave wakeup detected, entering active state");
+    if (state == WorkingState::PendingActive) {
+        // Slave acknowledged our wakeup, now enter active state
+        if (debug_enabled_.load()) {
+            ESP_LOGI(kTag, "Slave ready, entering active state");
+        }
+        EnterActiveState();
+    } else if (state == WorkingState::Idle || state == WorkingState::PendingIdle) {
+        // Slave is waking us up (slave-initiated), enter active state directly
+        if (debug_enabled_.load()) {
+            ESP_LOGI(kTag, "Slave wakeup detected, entering active state");
+        }
         EnterActiveState();
     }
-
-    // Configure interrupt to detect SRDY going high (for ACK or idle detection)
-    // 配置中断以检测 SRDY 变高
-    ConfigureSrdyInterrupt(false);  // Not for wakeup, for detecting high
 }
 
-// 处理 SRDY 拉高事件（Slave 确认收到数据或进入休眠）
 // Handle SRDY high event: Slave ACK or entering sleep
 void UartEthModem::HandleSrdyHigh() {
     WorkingState state = working_state_.load();
 
     if (state == WorkingState::PendingIdle) {
         // Both sides are now idle, enter idle state
-        // 双方都空闲了，进入休眠状态
-        ESP_LOGI(kTag, "Slave also idle, entering idle state");
-        EnterIdleState();
+        if (debug_enabled_.load()) {
+            ESP_LOGI(kTag, "Slave also idle, entering idle state");
+        }
+        EnterIdleState();  // This will configure interrupt for wakeup
     }
-
-    // Configure interrupt to detect SRDY going low (for wakeup)
-    // 配置中断以检测 SRDY 拉低（用于唤醒）
-    ConfigureSrdyInterrupt(true);  // For wakeup
 }
 
-// 处理空闲超时
 // Handle idle timeout
 void UartEthModem::HandleIdleTimeout() {
     WorkingState state = working_state_.load();
 
-    if (state == WorkingState::Active) {
+    if (state == WorkingState::PendingActive) {
+        // Timeout waiting for slave to wake up
+        // Check if SRDY is already low (we might have missed the interrupt)
+        if (IsSrdyLow()) {
+            if (debug_enabled_.load()) {
+                ESP_LOGI(kTag, "Slave ready (polled), entering active state");
+            }
+            EnterActiveState();
+        } else {
+            // Slave not responding, signal timeout but enter active state anyway
+            // (the TX will likely fail, but that's handled at higher level)
+            ESP_LOGW(kTag, "Slave not responding (SRDY still high), forcing active state");
+            EnterActiveState();
+        }
+    } else if (state == WorkingState::Active) {
         // Timeout in active state, enter pending idle
-        // 工作状态超时，进入待退出状态
-        ESP_LOGI(kTag, "Idle timeout, entering pending idle state");
+        if (debug_enabled_.load()) {
+            ESP_LOGI(kTag, "Idle timeout, entering pending idle state");
+        }
         EnterPendingIdleState();
     } else if (state == WorkingState::PendingIdle) {
         // Check if SRDY is high
-        // 检查 SRDY 是否已经变高
         if (!IsSrdyLow()) {
-            ESP_LOGI(kTag, "Slave is idle, entering idle state");
+            if (debug_enabled_.load()) {
+                ESP_LOGI(kTag, "Slave is idle, entering idle state");
+            }
             EnterIdleState();
         }
         // If SRDY is still low, slave has data to send
@@ -871,45 +918,69 @@ void UartEthModem::HandleIdleTimeout() {
     }
 }
 
-// 进入工作状态
+// Enter pending active state: Master initiates wakeup, wait for slave
+void UartEthModem::EnterPendingActiveState() {
+    WorkingState prev_state = working_state_.load();
+    if (prev_state != WorkingState::Idle && prev_state != WorkingState::PendingIdle) {
+        return;  // Only valid from Idle or PendingIdle state
+    }
+
+    // Set MRDY low first to prevent slave from sleeping
+    SetMrdy(MrdyLevel::Low);
+
+    // Check if SRDY is already low (slave still active or already responded)
+    // This avoids waiting for an interrupt that will never come
+    if (IsSrdyLow()) {
+        if (debug_enabled_.load()) {
+            ESP_LOGI(kTag, "Slave already ready, entering active state directly");
+        }
+        // Slave is already ready, go directly to active state
+        EnterActiveState();
+        return;
+    }
+
+    if (debug_enabled_.load()) {
+        ESP_LOGI(kTag, "Entering pending active state (waking up slave)");
+    }
+
+    // Update state
+    working_state_.store(WorkingState::PendingActive);
+
+    // Configure SRDY interrupt to detect slave wakeup (falling edge -> low)
+    ConfigureSrdyInterrupt(kSrdyInterruptForAck);
+}
+
 // Enter active working state
 void UartEthModem::EnterActiveState() {
     WorkingState prev_state = working_state_.load();
     if (prev_state == WorkingState::Active) {
-        return;  // Already active
+        // Already active, just signal in case someone is waiting
+        xEventGroupSetBits(event_group_, kEventActiveState);
+        return;
     }
 
     ESP_LOGD(kTag, "Entering active state");
 
-    // Only acquire PM lock and start DMA receive when transitioning from Idle state
-    // PendingIdle -> Active doesn't need these (lock was never released, DMA still running)
-    // 只有从 Idle 状态进入时才获取锁和启动 DMA 接收
-    // PendingIdle -> Active 不需要（锁从未释放，DMA 仍在运行）
-    if (prev_state == WorkingState::Idle) {
-        ESP_ERROR_CHECK(esp_pm_lock_acquire(pm_lock_handle_));
-        
-        // Start DMA receive (this also acquires UHCI's NO_LIGHT_SLEEP lock)
-        // 启动 DMA 接收（这也会获取 UHCI 的 NO_LIGHT_SLEEP 锁）
-        esp_err_t ret = uart_uhci_.StartReceive(rx_buffer_, config_.rx_buffer_size);
+    // Start DMA receive if not already running
+    // (DMA keeps running during PendingIdle, so check before starting)
+    if (!uart_uhci_.IsReceiving()) {
+        esp_err_t ret = uart_uhci_.StartReceive();
         if (ret != ESP_OK) {
             ESP_LOGE(kTag, "Failed to start UHCI receive: %s", esp_err_to_name(ret));
         }
     }
 
-    // Set MRDY low (busy)
-    // 拉低 MRDY（忙）
-    SetMrdy(true);
+    // Set MRDY low (busy) - may already be low from PendingActive
+    SetMrdy(MrdyLevel::Low);
 
     // Update state
     working_state_.store(WorkingState::Active);
     last_activity_time_us_ = esp_timer_get_time();
 
-    // Configure SRDY interrupt for detecting high level
-    // 配置 SRDY 中断以检测高电平
-    ConfigureSrdyInterrupt(false);
+    // Signal that active state is ready (DMA receive started)
+    xEventGroupSetBits(event_group_, kEventActiveState);
 }
 
-// 进入待退出状态
 // Enter pending idle state
 void UartEthModem::EnterPendingIdleState() {
     if (working_state_.load() != WorkingState::Active) {
@@ -919,44 +990,34 @@ void UartEthModem::EnterPendingIdleState() {
     ESP_LOGD(kTag, "Entering pending idle state");
 
     // Set MRDY high (not busy, allow slave to sleep)
-    // 拉高 MRDY（空闲，允许 Slave 休眠）
-    SetMrdy(false);
+    SetMrdy(MrdyLevel::High);
 
     // Update state
     working_state_.store(WorkingState::PendingIdle);
-
-    // Configure SRDY interrupt for detecting high level
-    // 配置 SRDY 中断以检测高电平
-    ConfigureSrdyInterrupt(false);
 }
 
-// 进入休眠状态
 // Enter idle/sleep state
 void UartEthModem::EnterIdleState() {
     ESP_LOGD(kTag, "Entering idle state");
 
+    // Clear active state bit (DMA will be stopped)
+    xEventGroupClearBits(event_group_, kEventActiveState);
+
     // Ensure MRDY is high
-    // 确保 MRDY 为高
-    SetMrdy(false);
+    SetMrdy(MrdyLevel::High);
 
     // Update state
     working_state_.store(WorkingState::Idle);
 
     // Stop DMA receive to release UHCI's NO_LIGHT_SLEEP lock
-    // 停止 DMA 接收以释放 UHCI 的 NO_LIGHT_SLEEP 锁
     uart_uhci_.StopReceive();
 
-    // Release PM lock to allow CPU frequency scaling
-    // 释放电源管理锁，允许 CPU 降频
-    ESP_ERROR_CHECK(esp_pm_lock_release(pm_lock_handle_));
-
     // Configure SRDY interrupt for wakeup (low level trigger)
-    // 配置 SRDY 中断用于唤醒（低电平触发）
-    ConfigureSrdyInterrupt(true);
+    ConfigureSrdyInterrupt(kSrdyInterruptForWakeup);
 }
 
 void UartEthModem::InitTaskRun() {
-    ESP_LOGI(kTag, "Init task started");
+    ESP_LOGD(kTag, "Init task started");
 
     // Wait for start signal
     xEventGroupWaitBits(event_group_, kEventStart, pdTRUE, pdTRUE, portMAX_DELAY);
@@ -968,6 +1029,8 @@ void UartEthModem::InitTaskRun() {
     // Run initialization sequence
     if (RunInitSequence() != ESP_OK) {
         ESP_LOGE(kTag, "Initialization sequence failed");
+        stop_flag_ = true;
+        initializing_ = false;
         xEventGroupSetBits(event_group_, kEventStop);
         goto exit;
     }
@@ -975,21 +1038,25 @@ void UartEthModem::InitTaskRun() {
     // Initialize iot_eth
     if (InitIotEth() != ESP_OK) {
         ESP_LOGE(kTag, "Failed to initialize iot_eth");
+        stop_flag_ = true;
+        initializing_ = false;
         xEventGroupSetBits(event_group_, kEventStop);
         goto exit;
     }
 
-    ESP_LOGI(kTag, "Initialization complete");
+    ESP_LOGD(kTag, "Initialization complete");
+    initializing_ = false;
     xEventGroupSetBits(event_group_, kEventInitDone);
 
 exit:
-    ESP_LOGI(kTag, "Init task exiting");
+    ESP_LOGD(kTag, "Init task exiting");
     xEventGroupSetBits(event_group_, kEventInitTaskDone);
 }
 
-// 发送帧（公共接口）：使用 UHCI DMA 发送
 // Send frame (public interface): send using UHCI DMA
 esp_err_t UartEthModem::SendFrame(const uint8_t* data, size_t length, FrameType type) {
+    std::lock_guard<std::mutex> lock(send_mutex_);
+
     // Allocate frame with header (DMA compatible memory)
     size_t total_len = sizeof(FrameHeader) + length;
     uint8_t* buffer = static_cast<uint8_t*>(heap_caps_malloc(total_len, MALLOC_CAP_DMA));
@@ -1010,32 +1077,40 @@ esp_err_t UartEthModem::SendFrame(const uint8_t* data, size_t length, FrameType 
     // Copy payload
     memcpy(buffer + sizeof(FrameHeader), data, length);
 
-    // Enter active state if not already (for MRDY control)
-    // 如果还没进入工作状态，先进入（用于控制 MRDY）
+    // Enter active state if not already (for MRDY control and DMA receive)
     if (working_state_.load() != WorkingState::Active) {
+        // Clear the active state bit first
+        xEventGroupClearBits(event_group_, kEventActiveState);
+        
         // Send event to main task to enter active state
-        Event event = {.type = EventType::TxRequest, .data = nullptr, .size = 0, .is_complete = false};
+        Event event = {.type = EventType::TxRequest, .rx_buffer = nullptr};
         xQueueSend(event_queue_, &event, pdMS_TO_TICKS(10));
         
-        // Wait a bit for state transition
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-
-    // Wait for SRDY to go low if needed (slave ready to receive)
-    // 如果需要，等待 SRDY 变低（slave 准备好接收）
-    if (!IsSrdyLow()) {
-        int64_t start_us = esp_timer_get_time();
-        while (!IsSrdyLow()) {
-            if (esp_timer_get_time() - start_us > 50 * 1000) {
-                ESP_LOGW(kTag, "Slave not responding (SRDY still high)");
-                break;
-            }
-            vTaskDelay(1);
+        // Wait for active state with DMA receive ready (max 50ms)
+        EventBits_t bits = xEventGroupWaitBits(
+            event_group_,
+            kEventActiveState,
+            pdFALSE,  // Don't clear on exit (will be cleared when entering idle)
+            pdTRUE,   // Wait for all bits
+            pdMS_TO_TICKS(50)
+        );
+        
+        if (!(bits & kEventActiveState)) {
+            ESP_LOGW(kTag, "Timeout waiting for active state");
+            // Continue anyway, the state machine will handle timeout
         }
     }
+    // Note: No need to poll for SRDY low here. The state machine ensures
+    // DMA is ready before setting kEventActiveState (via PendingActive -> Active transition)
+
+    // Update activity time
+    last_activity_time_us_ = esp_timer_get_time();
+    // Clear event bits before sending (so we wait for THIS TX's completion and ACK)
+    xEventGroupClearBits(event_group_, kEventSrdyHigh | kEventTxDone);
+    // Enable interrupt for detecting SRDY high
+    ConfigureSrdyInterrupt(kSrdyInterruptForAck);
 
     // Transmit via UHCI DMA (non-blocking, returns immediately)
-    // 通过 UHCI DMA 发送（非阻塞，立即返回）
     esp_err_t ret = uart_uhci_.Transmit(buffer, total_len);
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "UHCI transmit failed: %s", esp_err_to_name(ret));
@@ -1043,22 +1118,35 @@ esp_err_t UartEthModem::SendFrame(const uint8_t* data, size_t length, FrameType 
         return ret;
     }
 
-    // Note: buffer will be freed after TX done callback
-    // For simplicity, we wait for TX to complete here
-    // 注意：缓冲区会在发送完成回调后释放
-    // 为简单起见，这里等待发送完成
-    ret = uart_uhci_.WaitTxDone(1000);
-    free(buffer);
+    // Wait for both TX done and SRDY high (ACK) using event group (releases CPU while waiting)
+    // Wait for all bits to be set before continuing
+    EventBits_t bits = xEventGroupWaitBits(
+        event_group_,
+        kEventTxDone | kEventSrdyHigh,
+        pdTRUE,   // clear on exit
+        pdTRUE,   // wait for all bits
+        pdMS_TO_TICKS(kAckTimeoutUs / 1000)
+    );
 
-    if (ret != ESP_OK) {
-        ESP_LOGE(kTag, "UHCI TX wait failed: %s", esp_err_to_name(ret));
-        return ret;
+    if (!(bits & kEventTxDone)) {
+        ESP_LOGE(kTag, "UHCI TX wait timeout");
+        free(buffer);
+        return ESP_ERR_TIMEOUT;
     }
 
+    if (!(bits & kEventSrdyHigh)) {
+        // ACK timeout - assume data was received, let upper layer handle retransmission if needed
+        ESP_LOGW(kTag, "Slave ACK timeout after %lld us, assuming success", esp_timer_get_time() - last_activity_time_us_);
+    } else {
+        if (debug_enabled_.load()) {
+            ESP_LOGI(kTag, "TX done, acked in %lld us", esp_timer_get_time() - last_activity_time_us_);
+        }
+    }
+
+    free(buffer);
     return ESP_OK;
 }
 
-// 处理 DMA 接收到的帧数据
 // Process frame data received via DMA
 void UartEthModem::ProcessReceivedFrame(uint8_t* data, size_t size) {
     if (size < sizeof(FrameHeader)) {
@@ -1110,15 +1198,14 @@ void UartEthModem::ProcessReceivedFrame(uint8_t* data, size_t size) {
 }
 
 void UartEthModem::HandleEthFrame(uint8_t* data, size_t length) {
-    if (!connected_.load()) {
+    if (!handshake_done_.load()) {
         // Check for handshake ACK
         if (length >= sizeof(kHandshakeAck) && memcmp(data, kHandshakeAck, sizeof(kHandshakeAck)) == 0) {
-            ESP_LOGI(kTag, "Handshake ACK received");
-            connected_ = true;
-            xEventGroupSetBits(event_group_, kEventConnected);
+            ESP_LOGD(kTag, "Handshake ACK received");
+            handshake_done_ = true;
+            xEventGroupSetBits(event_group_, kEventHandshakeDone);
             // Mark as initialized, but wait for IP_EVENT_ETH_GOT_IP for network ready
-            SetInitialized(true);
-            SetNetworkStatus(NetworkStatus::LinkUp);
+            initialized_ = true;
         }
         free(data);
         return;
@@ -1165,35 +1252,51 @@ void UartEthModem::ParseAtResponse(const std::string& response) {
         ESP_LOGI(kTag, "AT<<< %s", response.c_str());
     }
 
-    // Parse CEREG
+    // Parse CEREG following at_modem.cc logic
     auto cereg_pos = response.find("+CEREG:");
     if (cereg_pos != std::string::npos) {
         int n = 0, stat = 0;
         char tac[16] = {0}, ci[16] = {0};
         int act = 0;
         
-        // Try different formats
-        if (sscanf(response.c_str() + cereg_pos, "+CEREG: %d,%d,\"%[^\"]\",\"%[^\"]\",%d", &n, &stat, tac, ci, &act) >= 2) {
+        // Try format 1: +CEREG: n,stat,"tac","ci",act (with n parameter)
+        if (sscanf(response.c_str() + cereg_pos, "+CEREG: %d,%d,\"%15[^\"]\",\"%15[^\"]\",%d", &n, &stat, tac, ci, &act) == 5) {
             cell_info_.stat = stat;
             cell_info_.tac = tac;
             cell_info_.ci = ci;
             cell_info_.act = act;
-        } else if (sscanf(response.c_str() + cereg_pos, "+CEREG: %d", &stat) == 1) {
+        }
+        // Try format 2: +CEREG: stat,"tac","ci",act (without n parameter)
+        else if (sscanf(response.c_str() + cereg_pos, "+CEREG: %d,\"%15[^\"]\",\"%15[^\"]\",%d", &stat, tac, ci, &act) == 4) {
+            cell_info_.stat = stat;
+            cell_info_.tac = tac;
+            cell_info_.ci = ci;
+            cell_info_.act = act;
+        }
+        // Try format 3: +CEREG: n,stat (unsolicited with n)
+        else if (sscanf(response.c_str() + cereg_pos, "+CEREG: %d,%d", &n, &stat) == 2) {
+            cell_info_.stat = stat;
+        }
+        // Try format 4: +CEREG: stat (query response)
+        else if (sscanf(response.c_str() + cereg_pos, "+CEREG: %d", &stat) == 1) {
             cell_info_.stat = stat;
         }
 
-        // Check registration status
+        // Check registration status (mirrored from at_modem.cc HandleUrc logic)
+        bool new_network_ready = cell_info_.stat == 1 || cell_info_.stat == 5;
         if (cell_info_.stat == 2) {
-            SetNetworkStatus(NetworkStatus::Searching);
+            SetNetworkEvent(UartEthModemEvent::Connecting);
         } else if (cell_info_.stat == 3) {
-            SetNetworkStatus(NetworkStatus::RegistrationDenied);
+            SetNetworkEvent(UartEthModemEvent::ErrorRegistrationDenied);
+        } else if (new_network_ready) {
+            if (initialized_.load()) {
+                SetNetworkEvent(UartEthModemEvent::Connected);
+            }
         }
     } else if (response.find("+ECNETDEVCTL: 1") != std::string::npos) {
         // Network device ready (link up)
-        SetNetworkStatus(NetworkStatus::LinkUp);
     } else if (response.find("+ECNETDEVCTL: 0") != std::string::npos) {
         // Network device down (link down)
-        SetNetworkStatus(NetworkStatus::LinkDown);
     }
 }
 
@@ -1206,7 +1309,7 @@ esp_err_t UartEthModem::RunInitSequence() {
     ret = SendAtWithRetry("AT", resp, 500, 20);
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "Modem not detected");
-        SetNetworkStatus(NetworkStatus::Error);
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
         return ret;
     }
 
@@ -1222,20 +1325,20 @@ esp_err_t UartEthModem::RunInitSequence() {
         
         // Reset after configuration
         // Clear network status changed bit before reset
-        xEventGroupClearBits(event_group_, kEventNetworkStatusChanged);
+        xEventGroupClearBits(event_group_, kEventNetworkEventChanged);
         SendAt("AT+ECRST", resp, 500);
-        auto bits = xEventGroupWaitBits(event_group_, kEventNetworkStatusChanged, pdTRUE, pdTRUE, pdMS_TO_TICKS(10000));
-        if (bits & kEventNetworkStatusChanged) {
+        auto bits = xEventGroupWaitBits(event_group_, kEventNetworkEventChanged, pdTRUE, pdTRUE, pdMS_TO_TICKS(10000));
+        if (bits & kEventNetworkEventChanged) {
             ESP_LOGI(kTag, "Modem reset completed");
         } else {
             ESP_LOGE(kTag, "Modem reset timed out");
-            SetNetworkStatus(NetworkStatus::Error);
+            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
             return ESP_ERR_TIMEOUT;
         }
         ret = SendAtWithRetry("AT", resp, 500, 20);
         if (ret != ESP_OK) {
             ESP_LOGE(kTag, "Modem not responding after reset");
-            SetNetworkStatus(NetworkStatus::Error);
+            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
             return ret;
         }
     }
@@ -1246,22 +1349,22 @@ esp_err_t UartEthModem::RunInitSequence() {
     ESP_LOGI(kTag, "Checking SIM card...");
     if (!CheckSimCard()) {
         ESP_LOGE(kTag, "SIM card not ready");
-        SetNetworkStatus(NetworkStatus::NoSimCard);
+        SetNetworkEvent(UartEthModemEvent::ErrorNoSim);
         return ESP_ERR_INVALID_STATE;
     }
 
     ESP_LOGI(kTag, "Waiting for network registration...");
-    SetNetworkStatus(NetworkStatus::Searching);
+    SetNetworkEvent(UartEthModemEvent::Connecting);
     
     // Enable CEREG URC
     SendAt("AT+CEREG=2", resp);
-    if (!WaitForRegistration(120000)) {
+    if (!WaitForRegistration(60000)) {
         if (cell_info_.stat == 3) {
             ESP_LOGE(kTag, "Registration denied");
-            SetNetworkStatus(NetworkStatus::RegistrationDenied);
+            SetNetworkEvent(UartEthModemEvent::ErrorRegistrationDenied);
         } else {
             ESP_LOGE(kTag, "Registration timeout");
-            SetNetworkStatus(NetworkStatus::Error);
+            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
         }
         return ESP_ERR_TIMEOUT;
     }
@@ -1271,7 +1374,7 @@ esp_err_t UartEthModem::RunInitSequence() {
     ret = SendAt("AT+ECNETDEVCTL=2,1,1", resp, 5000);
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "Failed to start network device");
-        SetNetworkStatus(NetworkStatus::Error);
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
         return ret;
     }
 
@@ -1280,18 +1383,26 @@ esp_err_t UartEthModem::RunInitSequence() {
     ret = SendFrame(kHandshakeRequest, sizeof(kHandshakeRequest), FrameType::kEthernet);
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "Handshake failed");
-        SetNetworkStatus(NetworkStatus::Error);
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
         return ret;
     }
 
     // Wait for handshake ACK
-    auto bits = xEventGroupWaitBits(event_group_, kEventConnected | kEventStop, pdFALSE, pdFALSE, pdMS_TO_TICKS(kHandshakeTimeoutMs));
-    if (bits & kEventConnected) {
+    auto bits = xEventGroupWaitBits(event_group_, kEventHandshakeDone | kEventStop, pdFALSE, pdFALSE, pdMS_TO_TICKS(kHandshakeTimeoutMs));
+    if (bits & kEventHandshakeDone) {
         ESP_LOGI(kTag, "Handshake successful");
     } else {
         ESP_LOGE(kTag, "Handshake timeout");
-        SetNetworkStatus(NetworkStatus::Error);
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
         return ESP_ERR_TIMEOUT;
+    }
+
+    // Set modem sleep parameters
+    ret = SendAt("AT+ECSCLKEX=1,3,30", resp, 1000);
+    if (ret != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to set modem sleep parameters");
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+        return ret;
     }
 
     // Network ready is set in HandleEthFrame when handshake ACK is received
@@ -1384,69 +1495,40 @@ void UartEthModem::QueryModemInfo() {
     ESP_LOGD(kTag, "Modem Info - IMEI: %s, ICCID: %s, Rev: %s", imei_.c_str(), iccid_.c_str(), module_revision_.c_str());
 }
 
-// 设置 MRDY 电平
-// Set MRDY level: low = true (busy), high = false (idle)
-void UartEthModem::SetMrdy(bool low) {
-    gpio_set_level(config_.mrdy_pin, low ? 0 : 1);
-    mrdy_is_low_.store(low);
+// Set MRDY level
+void UartEthModem::SetMrdy(MrdyLevel level) {
+    bool is_low = (level == MrdyLevel::Low);
+    gpio_set_level(config_.mrdy_pin, is_low ? 0 : 1);
+    mrdy_is_low_.store(is_low);
 }
 
-// 检测 SRDY 是否为低
 // Check if SRDY is low (slave is busy/has data)
 bool UartEthModem::IsSrdyLow() {
     return gpio_get_level(config_.srdy_pin) == 0;
 }
 
-// 发送确认脉冲：MRDY 高 50us
 // Send ACK pulse: MRDY high for 50us
 void UartEthModem::SendAckPulse() {
     // MRDY: low -> high (50us) -> low
-    SetMrdy(false);  // High
+    SetMrdy(MrdyLevel::High);  // High
     esp_rom_delay_us(kAckPulseUs);
-    SetMrdy(true);   // Low (back to busy)
+    SetMrdy(MrdyLevel::Low);   // Low (back to busy)
 }
 
-// 等待 SRDY 确认脉冲（高电平脉冲）
-// Wait for SRDY ACK pulse (high level pulse)
-// Returns true if ACK received, false if timeout
-bool UartEthModem::WaitForSrdyAck(int64_t timeout_us) {
-    int64_t start_us = esp_timer_get_time();
-
-    // Wait for SRDY to go high
-    while (IsSrdyLow()) {
-        if (esp_timer_get_time() - start_us > timeout_us) {
-            if (debug_enabled_.load()) {
-                ESP_LOGW(kTag, "Wait for SRDY ACK timeout");
-            }
-            return false;
-        }
-        // Short delay to avoid busy-waiting
-        esp_rom_delay_us(10);
-    }
-
-    return true;
-}
-
-// 配置 SRDY 中断类型
 // Configure SRDY interrupt type
 // for_wakeup: true = LOW_LEVEL (for light sleep wakeup), false = edge detection
 void UartEthModem::ConfigureSrdyInterrupt(bool for_wakeup) {
     if (for_wakeup) {
         // LOW_LEVEL trigger for light sleep wakeup
-        // 低电平触发，用于低功耗唤醒
         gpio_set_intr_type(config_.srdy_pin, GPIO_INTR_LOW_LEVEL);
     } else {
-        // Use ANYEDGE to detect both rising and falling edges
-        // This allows us to detect ACK pulses and state changes
-        // 使用双边沿触发，以检测 ACK 脉冲和状态变化
+        // Use POSEDGE to detect SRDY going high (slave ACK or entering sleep)
         gpio_set_intr_type(config_.srdy_pin, GPIO_INTR_ANYEDGE);
     }
     gpio_intr_enable(config_.srdy_pin);
 }
 
-// SRDY 中断处理函数
 // ISR handler for SRDY pin changes
-// 根据当前配置的中断类型，发送对应的事件到主任务队列
 void IRAM_ATTR UartEthModem::SrdyIsrHandler(void* arg) {
     auto* self = static_cast<UartEthModem*>(arg);
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -1455,49 +1537,36 @@ void IRAM_ATTR UartEthModem::SrdyIsrHandler(void* arg) {
     gpio_intr_disable(self->config_.srdy_pin);
 
     // Determine event type based on current SRDY level
-    // 根据当前SRDY电平确定事件类型
     int level = gpio_get_level(self->config_.srdy_pin);
+
+    // Send event to queue for state machine processing
     Event event = {
         .type = (level == 0) ? EventType::SrdyLow : EventType::SrdyHigh,
-        .data = nullptr,
-        .size = 0,
-        .is_complete = false,
+        .rx_buffer = nullptr,
     };
 
     xQueueSendFromISR(self->event_queue_, &event, &xHigherPriorityTaskWoken);
+
+    // Set event group bit for SRDY high (used by WaitForSrdyAck)
+    xEventGroupSetBitsFromISR(self->event_group_, kEventSrdyHigh, &xHigherPriorityTaskWoken);
 
     if (xHigherPriorityTaskWoken) {
         portYIELD_FROM_ISR();
     }
 }
 
-void UartEthModem::SetInitialized(bool initialized) {
-    bool old_value = initialized_.exchange(initialized);
-    if (old_value != initialized) {
-        ESP_LOGI(kTag, "Network initialized: %s -> %s", old_value ? "true" : "false", initialized ? "true" : "false");
-    }
-}
-
-void UartEthModem::SetNetworkStatus(NetworkStatus status) {
-    // Always update the status value
-    NetworkStatus old_status = network_status_.exchange(status);
+void UartEthModem::SetNetworkEvent(UartEthModemEvent event) {
+    // Always update the event value
+    UartEthModemEvent old_event = network_event_.exchange(event);
     // Set event bit to notify waiting tasks
     if (event_group_) {
-        xEventGroupSetBits(event_group_, kEventNetworkStatusChanged);
+        xEventGroupSetBits(event_group_, kEventNetworkEventChanged);
     }
     
-    // Only trigger callback when initialized
-    if (initialized_.load()) {
-        if (old_status != status) {
-            ESP_LOGI(kTag, "Network status: %s -> %s", GetNetworkStatusName(old_status), GetNetworkStatusName(status));
-            if (network_status_callback_) {
-                network_status_callback_(status);
-            }
-        }
-    } else {
-        // Log status changes even during initialization
-        if (old_status != status) {
-            ESP_LOGI(kTag, "Network status: %s -> %s", GetNetworkStatusName(old_status), GetNetworkStatusName(status));
+    if (old_event != event) {
+        ESP_LOGI(kTag, "Network event: %s -> %s", GetNetworkEventName(old_event), GetNetworkEventName(event));
+        if (network_event_callback_) {
+            network_event_callback_(event);
         }
     }
 }
@@ -1507,11 +1576,8 @@ void UartEthModem::IpEventHandler(void* arg, esp_event_base_t event_base,
     auto* self = static_cast<UartEthModem*>(arg);
     
     if (event_base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
-        ip_event_got_ip_t* event = static_cast<ip_event_got_ip_t*>(event_data);
-        ESP_LOGI(kTag, "Got IP address: " IPSTR, IP2STR(&event->ip_info.ip));
-        
         // Network is ready now
-        self->SetNetworkStatus(NetworkStatus::Ready);
+        self->SetNetworkEvent(UartEthModemEvent::Connected);
         if (self->event_group_) {
             xEventGroupSetBits(self->event_group_, kEventNetworkReady);
         }
@@ -1527,11 +1593,13 @@ void UartEthModem::CleanupResources(bool cleanup_iot_eth) {
     // Cleanup UHCI controller
     uart_uhci_.Deinit();
 
-    // Cleanup DMA buffer
-    if (rx_buffer_) {
-        free(rx_buffer_);
-        rx_buffer_ = nullptr;
+    // Cleanup reassembly buffer
+    if (reassembly_buffer_) {
+        free(reassembly_buffer_);
+        reassembly_buffer_ = nullptr;
     }
+    reassembly_size_ = 0;
+    reassembly_expected_ = 0;
 
     // Cleanup semaphores
     if (at_command_response_semaphore_) {
