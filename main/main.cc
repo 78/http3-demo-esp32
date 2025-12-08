@@ -3,6 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <freertos/event_groups.h>
 #include <driver/gpio.h>
 #include <vector>
 #include <set>
@@ -18,8 +19,8 @@
 #include <esp_timer.h>
 #include <esp_crt_bundle.h>
 #include "http3_manager.h"
-#include "wifi_station.h"
-#include "ssid_manager.h"
+#include <wifi_manager.h>
+#include <ssid_manager.h>
 #include "uart_eth_modem/uart_eth_modem.h"
 #include "pmic/pmic.h"
 #include "quic_test.h"
@@ -223,12 +224,22 @@ static bool Init4GNetwork() {
     return true;
 }
 
+// Event bits for WiFi initialization
+static constexpr uint32_t kEventWifiConnected = (1 << 0);
+static constexpr uint32_t kEventWifiConfigModeExit = (1 << 1);
+static constexpr uint32_t kEventWifiDisconnected = (1 << 2);
+
 /**
  * 初始化 WiFi 并等待连接
+ * 参考 managed_components/78__esp-wifi-connect/README.md
  */
 [[maybe_unused]] static bool InitWifi() {
     ESP_LOGI(TAG, "Initializing WiFi...");
     
+    // Initialize the default event loop
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    
+    // Initialize NVS flash for Wi-Fi configuration
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -236,23 +247,103 @@ static bool Init4GNetwork() {
     }
     ESP_ERROR_CHECK(ret);
     
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    // Get the WifiManager singleton
+    auto& wifi_manager = WifiManager::GetInstance();
     
-    auto& wifi = WifiStation::GetInstance();
-    wifi.AddAuth("KFC", "chuheridangwu");
+    // Initialize with configuration
+    WifiManagerConfig config;
+    config.ssid_prefix = "ESP32";  // AP mode SSID prefix
+    config.language = "zh-CN";     // Web UI language
+    if (!wifi_manager.Initialize(config)) {
+        ESP_LOGE(TAG, "Failed to initialize WifiManager");
+        return false;
+    }
     
-    wifi.OnConnected([](const std::string& ssid) {
-        ESP_LOGI(TAG, "WiFi connected to: %s", ssid.c_str());
+    // Create event group for waiting WiFi events
+    EventGroupHandle_t wifi_event_group = xEventGroupCreate();
+    if (wifi_event_group == nullptr) {
+        ESP_LOGE(TAG, "Failed to create WiFi event group");
+        return false;
+    }
+    
+    // Set event callback to handle WiFi events
+    wifi_manager.SetEventCallback([wifi_event_group](WifiEvent event) {
+        switch (event) {
+            case WifiEvent::Scanning:
+                ESP_LOGI(TAG, "WiFi: Scanning for networks...");
+                break;
+            case WifiEvent::Connecting:
+                ESP_LOGI(TAG, "WiFi: Connecting to network...");
+                break;
+            case WifiEvent::Connected:
+                ESP_LOGI(TAG, "WiFi: Connected successfully!");
+                xEventGroupSetBits(wifi_event_group, kEventWifiConnected);
+                break;
+            case WifiEvent::Disconnected:
+                ESP_LOGW(TAG, "WiFi: Disconnected from network");
+                xEventGroupSetBits(wifi_event_group, kEventWifiDisconnected);
+                break;
+            case WifiEvent::ConfigModeEnter:
+                ESP_LOGI(TAG, "WiFi: Entered config mode");
+                break;
+            case WifiEvent::ConfigModeExit:
+                ESP_LOGI(TAG, "WiFi: Exited config mode");
+                xEventGroupSetBits(wifi_event_group, kEventWifiConfigModeExit);
+                break;
+        }
     });
     
-    wifi.Start();
+    // Check if there are saved Wi-Fi credentials
+    auto& ssid_list = SsidManager::GetInstance().GetSsidList();
+    if (ssid_list.empty()) {
+        // No credentials saved, start config AP mode
+        ESP_LOGI(TAG, "No saved WiFi credentials, starting config AP mode");
+        wifi_manager.StartConfigAp();
+        
+        // Wait for config mode exit (user configured WiFi)
+        ESP_LOGI(TAG, "Waiting for WiFi configuration...");
+        EventBits_t bits = xEventGroupWaitBits(
+            wifi_event_group,
+            kEventWifiConfigModeExit | kEventWifiConnected,
+            pdTRUE,   // Clear bits on exit
+            pdFALSE,  // Wait for any bit (OR)
+            portMAX_DELAY  // Wait indefinitely
+        );
+        
+        if (bits & kEventWifiConfigModeExit) {
+            ESP_LOGI(TAG, "Config mode exited, starting station mode");
+            // After config mode exit, start station mode to connect to configured WiFi
+            wifi_manager.StartStation();
+        } else if (bits & kEventWifiConnected) {
+            // Already connected during config (shouldn't happen, but handle it)
+            ESP_LOGI(TAG, "WiFi connected during config mode");
+        }
+    } else {
+        // Try to connect to the saved Wi-Fi network
+        ESP_LOGI(TAG, "Found %zu saved WiFi credential(s), starting station mode", ssid_list.size());
+        wifi_manager.StartStation();
+    }
     
-    if (!wifi.WaitForConnected(30000)) {
+    // Wait for WiFi connection with 30s timeout
+    ESP_LOGI(TAG, "Waiting for WiFi connection...");
+    EventBits_t bits = xEventGroupWaitBits(
+        wifi_event_group,
+        kEventWifiConnected,
+        pdTRUE,   // Clear bits on exit
+        pdFALSE,  // Wait for any bit (OR)
+        pdMS_TO_TICKS(30000)  // 30 second timeout
+    );
+    
+    vEventGroupDelete(wifi_event_group);
+    
+    if (!(bits & kEventWifiConnected)) {
         ESP_LOGE(TAG, "WiFi connection timeout");
         return false;
     }
     
-    ESP_LOGI(TAG, "WiFi connected! IP: %s", wifi.GetIpAddress().c_str());
+    ESP_LOGI(TAG, "WiFi connected! SSID: %s, IP: %s", 
+             wifi_manager.GetSsid().c_str(), 
+             wifi_manager.GetIpAddress().c_str());
     return true;
 }
 
@@ -388,9 +479,6 @@ extern "C" void app_main(void) {
         return;
     }
     
-    // 共享连接测试
-    TestHttp3ManagerSharedConnection("api.tenclass.net", 443);
-    
 #else
     // ========== 4G 模式 ==========
     ESP_LOGI(TAG, "Running in 4G mode");
@@ -407,10 +495,13 @@ extern "C" void app_main(void) {
     // };
     // ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
     
+#endif
+    
+    // 共享连接测试
+    // TestHttp3ManagerSharedConnection("api.tenclass.net", 443);
+    
     // HTTP 下载速度测试
     TestHttpClientDownload("https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/firmwares/v1.9.4_xmini-c3/xiaozhi.bin");
-    
-#endif
     
     ESP_LOGI(TAG, "HTTPS Demo completed");
 
