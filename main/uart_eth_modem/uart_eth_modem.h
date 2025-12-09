@@ -170,6 +170,16 @@ public:
      */
     void SetDebug(bool enabled);
 
+    /**
+     * @brief Print UART UHCI RX ISR statistics
+     *
+     * Prints the accumulated call count and timing statistics for the
+     * HandleGdmaRxDone ISR. Useful for performance analysis.
+     *
+     * @param reset If true, reset statistics after printing
+     */
+    void PrintStatistics(bool reset = false);
+
     // Modem information getters
     std::string GetImei();
     std::string GetIccid();

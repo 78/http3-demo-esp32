@@ -172,7 +172,6 @@ esp_err_t UartEthModem::Start() {
     // Note: Don't start DMA receive here, will be started when entering Active state
 
     // Create main task (handles all events, no blocking operations)
-    // Priority 10 is high enough for UART handling but not too high to cause WDT issues
     xTaskCreate([](void* arg) {
         static_cast<UartEthModem*>(arg)->MainTaskRun();
         vTaskDelete(nullptr);
@@ -218,6 +217,13 @@ esp_err_t UartEthModem::Stop() {
     initializing_ = false;
     if (event_group_) {
         xEventGroupSetBits(event_group_, kEventStop);
+    }
+
+    // Send Stop event to main task queue to wake it up from xQueueReceive
+    // (MainTask may be blocked on portMAX_DELAY in Idle state)
+    if (event_queue_) {
+        Event event = {.type = EventType::Stop, .rx_buffer = nullptr};
+        xQueueSend(event_queue_, &event, 0);
     }
 
     // Wait for tasks to finish
@@ -292,6 +298,29 @@ void UartEthModem::SetDebug(bool enabled) {
     debug_enabled_.store(enabled);
 }
 
+void UartEthModem::PrintStatistics(bool reset) {
+    auto stats = uart_uhci_.GetRxIsrStatistics();
+    
+    ESP_LOGI(kTag, "=== UART UHCI RX ISR Statistics ===");
+    ESP_LOGI(kTag, "  Call count: %lu", stats.call_count);
+    
+    if (stats.call_count > 0) {
+        uint32_t avg_time_us = static_cast<uint32_t>(stats.total_time_us / stats.call_count);
+        ESP_LOGI(kTag, "  Total time: %llu us", stats.total_time_us);
+        ESP_LOGI(kTag, "  Average time: %lu us", avg_time_us);
+        ESP_LOGI(kTag, "  Min time: %lu us", stats.min_time_us);
+        ESP_LOGI(kTag, "  Max time: %lu us", stats.max_time_us);
+    } else {
+        ESP_LOGI(kTag, "  No calls recorded yet");
+    }
+    ESP_LOGI(kTag, "====================================");
+    
+    if (reset) {
+        uart_uhci_.ResetRxIsrStatistics();
+        ESP_LOGI(kTag, "Statistics reset");
+    }
+}
+
 std::string UartEthModem::GetImei() {
     if (imei_.empty()) {
         std::string resp;
@@ -356,6 +385,10 @@ std::string UartEthModem::GetModuleRevision() {
 }
 
 int UartEthModem::GetSignalStrength() {
+    if (!initialized_.load()) {
+        return 99;
+    }
+
     std::string resp;
     if (SendAt("AT+CSQ", resp, 500) == ESP_OK) {
         // Parse +CSQ: rssi,ber

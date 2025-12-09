@@ -57,6 +57,15 @@ public:
     using RxCallback = bool(*)(const RxEventData& data, void* user_data);
     using TxDoneCallback = bool(*)(const TxDoneEventData& data, void* user_data);
 
+    // Statistics for RX ISR performance monitoring
+    // RX ISR 性能监控统计
+    struct RxIsrStatistics {
+        uint32_t call_count;           // Total number of calls / 累积调用次数
+        uint64_t total_time_us;        // Total time spent in ISR (microseconds) / 累积耗时（微秒）
+        uint32_t min_time_us;          // Minimum single call time / 单次最小耗时
+        uint32_t max_time_us;          // Maximum single call time / 单次最大耗时
+    };
+
     // Buffer pool configuration
     // 缓冲区池配置
     struct BufferPoolConfig {
@@ -111,6 +120,14 @@ public:
     // Check if RX is currently running
     // 检查 RX 是否正在运行
     bool IsReceiving() const { return rx_running_.load(); }
+
+    // Get RX ISR statistics
+    // 获取 RX ISR 统计信息
+    RxIsrStatistics GetRxIsrStatistics() const;
+
+    // Reset RX ISR statistics
+    // 重置 RX ISR 统计信息
+    void ResetRxIsrStatistics();
 
     // Transmit data via DMA (non-blocking)
     // Buffer must remain valid until TX done callback
@@ -202,6 +219,13 @@ private:
     TxDoneCallback tx_done_callback_{nullptr};
     void* rx_callback_user_data_{nullptr};
     void* tx_callback_user_data_{nullptr};
+
+    // RX ISR statistics (updated atomically from ISR)
+    // RX ISR 统计（从 ISR 中原子更新）
+    std::atomic<uint32_t> rx_isr_call_count_{0};
+    std::atomic<uint64_t> rx_isr_total_time_us_{0};
+    std::atomic<uint32_t> rx_isr_min_time_us_{UINT32_MAX};
+    std::atomic<uint32_t> rx_isr_max_time_us_{0};
 
     // Delete copy/move
     UartUhci(const UartUhci&) = delete;

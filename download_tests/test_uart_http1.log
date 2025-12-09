@@ -1,0 +1,180 @@
+I (32) octal_psram: vendor id    : 0x0d (AP)
+I (32) octal_psram: dev id       : 0x02 (generation 3)
+I (32) octal_psram: density      : 0x03 (64 Mbit)
+I (32) octal_psram: good-die     : 0x01 (Pass)
+I (33) octal_psram: Latency      : 0x01 (Fixed)
+I (33) octal_psram: VCC          : 0x01 (3V)
+I (33) octal_psram: SRF          : 0x01 (Fast Refresh)
+I (33) octal_psram: BurstType    : 0x01 (Hybrid Wrap)
+I (33) octal_psram: BurstLen     : 0x01 (32 Byte)
+I (34) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)
+I (34) octal_psram: DriveStrength: 0x00 (1/1)
+I (35) MSPI Timing: PSRAM timing tuning index: 4
+I (35) esp_psram: Found 8MB PSRAM device
+I (35) esp_psram: Speed: 80MHz
+I (35) cpu_start: Multicore app
+I (44) cpu_start: Pro cpu start user code
+I (44) cpu_start: cpu freq: 240000000 Hz
+I (44) app_init: Application information:
+I (44) app_init: Project name:     quic-client
+I (45) app_init: App version:      e3a7bc9-dirty
+I (45) app_init: Compile time:     Dec  9 2025 18:22:24
+I (45) app_init: ELF file SHA256:  ab5f8b916...
+I (45) app_init: ESP-IDF:          v5.5.1-418-gf1a1df9b2e
+I (45) efuse_init: Min chip rev:     v0.0
+I (45) efuse_init: Max chip rev:     v0.99 
+I (45) efuse_init: Chip rev:         v0.2
+I (46) heap_init: Initializing. RAM available for dynamic allocation:
+I (46) heap_init: At 3FC9D340 len 0004C3D0 (304 KiB): RAM
+I (46) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+I (46) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+I (46) heap_init: At 600FE030 len 00001FA8 (7 KiB): RTCRAM
+I (47) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator
+I (47) spi_flash: detected chip: winbond
+I (47) spi_flash: flash io: qio
+I (48) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (48) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (0) main_task: Started on CPU1
+I (1) esp_psram: Reserving pool of 64K of internal memory for DMA/internal allocations
+I (1) main_task: Calling app_main()
+I (1) HTTPS_DEMO: HTTPS Demo Starting... Press GPIO1 to restart!!!
+I (4) PMIC: IRQ_EN_0: 0xFF
+I (5) PMIC: IRQ_EN_1: 0xFC
+I (5) PMIC: IRQ_EN_2: 0x5F
+I (6) PMIC: PMIC singleton initialized successfully
+I (6) HTTPS_DEMO: Initializing reset button on GPIO1...
+I (6) HTTPS_DEMO: Reset button initialized, low level will trigger system restart
+I (7) HTTPS_DEMO: Running in 4G mode
+I (7) HTTPS_DEMO: Initializing 4G Network...
+I (7) HTTPS_DEMO: Initializing Modem Hardware...
+I (7) HTTPS_DEMO: RI pin is low, powering on modem
+I (507) HTTPS_DEMO: Modem hardware initialized
+I (508) UartEthModem: Starting UartEthModem...
+I (509) UartUhci: UHCI 0 initialized (UART 1), RX pool: 4 x 1600 bytes
+I (510) UartEthModem: Detecting modem...
+I (510) UartEthModem: UartEthModem starting asynchronously...
+I (510) HTTPS_DEMO: Waiting for network ready...
+I (1071) UartEthModem: Checking network configuration...
+I (1073) UartEthModem: Querying modem info...
+I (1079) UartEthModem: Checking SIM card...
+I (1080) UartEthModem: Waiting for network registration...
+I (1081) UartEthModem: Network event: Disconnected -> Connecting
+I (1081) HTTPS_DEMO: Network event: Connecting
+I (1083) UartEthModem: Starting network device...
+I (1085) UartEthModem: Starting handshake...
+I (1087) UartEthModem: Handshake successful
+I (1088) UartEthModem: Modem initialization complete!
+I (1088) iot_eth: IoT ETH Version: 0.1.0
+I (1089) iot_eth.netif_glue: b8:f8:62:e9:76:42
+I (1089) iot_eth.netif_glue: ethernet attached to netif
+I (1089) iot_eth.netif_glue: eth_action_handle: 0x3fcb5928, 0x3c087fbc, 0, 0x3fcb59c0, 0x3fceee0c
+I (1090) iot_eth: uart_eth: MAC address: B8:F8:62:E9:76:42
+I (1090) iot_eth.netif_glue: eth_action_handle: 0x3fcb5928, 0x3c087fbc, 2, 0x3fcb59f4, 0x3fceee0c
+I (2104) iot_eth.netif_glue: Ethernet Got IP Address
+I (2104) iot_eth.netif_glue: ~~~~~~~~~~~
+I (2104) iot_eth.netif_glue: ETHIP:192.168.10.2
+I (2104) iot_eth.netif_glue: ETHMASK:255.255.255.0
+I (2104) iot_eth.netif_glue: ETHGW:192.168.10.1
+I (2104) iot_eth.netif_glue: ~~~~~~~~~~~
+I (2104) UartEthModem: Network event: Connecting -> Connected
+I (2105) HTTPS_DEMO: Network event: Connected
+I (2105) HTTPS_DEMO: === 4G Modem Info ===
+I (2105) HTTPS_DEMO:   IMEI:     860608076252674
+I (2105) HTTPS_DEMO:   ICCID:    89860818102370057799
+I (2105) HTTPS_DEMO:   Carrier:  46000
+I (2107) HTTPS_DEMO:   Revision: XJ_EC716S_Modem_AI02_V0201.001
+I (2107) HTTPS_DEMO:   Signal:   16 (CSQ)
+I (2111) HTTPS_DEMO:   Cell:     TAC=2495, CI=009A8142, AcT=7
+I (2111) HTTPS_DEMO: 4G Network ready!
+I (2111) HTTPS_DEMO: ===========================================
+I (2111) HTTPS_DEMO: === HTTP Client Download Speed Test ===
+I (2111) HTTPS_DEMO: ===========================================
+I (2112) HTTPS_DEMO: URL: https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/firmwares/v1.9.4_xmini-c3/xiaozhi.bin
+I (2714) esp-x509-crt-bundle: Certificate validated
+I (3305) HTTPS_DEMO: HTTP Status: 200, Content-Length: 2381520
+I (3306) HTTPS_DEMO: Starting download...
+I (4323) HTTPS_DEMO: Downloaded: 98304 bytes (96.0 KB), Instant: 94.4 KB/s (96641 B/s), Average: 94.4 KB/s (96641 B/s)
+I (5363) HTTPS_DEMO: Downloaded: 188416 bytes (184.0 KB), Instant: 84.6 KB/s (86656 B/s), Average: 89.4 KB/s (91594 B/s)
+I (6533) HTTPS_DEMO: Downloaded: 278528 bytes (272.0 KB), Instant: 75.2 KB/s (76984 B/s), Average: 84.3 KB/s (86295 B/s)
+I (7673) HTTPS_DEMO: Downloaded: 319488 bytes (312.0 KB), Instant: 35.1 KB/s (35927 B/s), Average: 71.4 KB/s (73148 B/s)
+I (8823) HTTPS_DEMO: Downloaded: 360448 bytes (352.0 KB), Instant: 34.8 KB/s (35618 B/s), Average: 63.8 KB/s (65326 B/s)
+I (9861) HTTPS_DEMO: Downloaded: 393216 bytes (384.0 KB), Instant: 30.9 KB/s (31591 B/s), Average: 58.6 KB/s (59988 B/s)
+I (11039) HTTPS_DEMO: Downloaded: 434176 bytes (424.0 KB), Instant: 34.0 KB/s (34773 B/s), Average: 54.8 KB/s (56147 B/s)
+I (12157) HTTPS_DEMO: Downloaded: 475136 bytes (464.0 KB), Instant: 35.8 KB/s (36636 B/s), Average: 52.4 KB/s (53682 B/s)
+I (13343) HTTPS_DEMO: Downloaded: 516096 bytes (504.0 KB), Instant: 33.7 KB/s (34514 B/s), Average: 50.2 KB/s (51416 B/s)
+I (14548) HTTPS_DEMO: Downloaded: 557056 bytes (544.0 KB), Instant: 33.2 KB/s (33987 B/s), Average: 48.4 KB/s (49548 B/s)
+I (15709) HTTPS_DEMO: Downloaded: 598016 bytes (584.0 KB), Instant: 34.5 KB/s (35289 B/s), Average: 47.1 KB/s (48214 B/s)
+I (16719) HTTPS_DEMO: Downloaded: 630784 bytes (616.0 KB), Instant: 31.7 KB/s (32464 B/s), Average: 45.9 KB/s (47028 B/s)
+I (17894) HTTPS_DEMO: Downloaded: 671744 bytes (656.0 KB), Instant: 34.0 KB/s (34859 B/s), Average: 45.0 KB/s (46048 B/s)
+I (19122) HTTPS_DEMO: Downloaded: 712704 bytes (696.0 KB), Instant: 32.6 KB/s (33352 B/s), Average: 44.0 KB/s (45062 B/s)
+I (20332) HTTPS_DEMO: Downloaded: 753664 bytes (736.0 KB), Instant: 33.1 KB/s (33847 B/s), Average: 43.2 KB/s (44265 B/s)
+I (21496) HTTPS_DEMO: Downloaded: 794624 bytes (776.0 KB), Instant: 34.4 KB/s (35189 B/s), Average: 42.7 KB/s (43684 B/s)
+I (22657) HTTPS_DEMO: Downloaded: 835584 bytes (816.0 KB), Instant: 34.5 KB/s (35284 B/s), Average: 42.2 KB/s (43180 B/s)
+I (23899) HTTPS_DEMO: Downloaded: 876544 bytes (856.0 KB), Instant: 32.2 KB/s (32977 B/s), Average: 41.6 KB/s (42565 B/s)
+I (25069) HTTPS_DEMO: Downloaded: 917504 bytes (896.0 KB), Instant: 34.2 KB/s (35011 B/s), Average: 41.2 KB/s (42159 B/s)
+I (26268) HTTPS_DEMO: Downloaded: 950272 bytes (928.0 KB), Instant: 26.7 KB/s (27314 B/s), Average: 40.4 KB/s (41383 B/s)
+I (27279) HTTPS_DEMO: Downloaded: 983040 bytes (960.0 KB), Instant: 31.7 KB/s (32435 B/s), Average: 40.0 KB/s (41006 B/s)
+I (28342) HTTPS_DEMO: Downloaded: 1015808 bytes (992.0 KB), Instant: 30.1 KB/s (30827 B/s), Average: 39.6 KB/s (40574 B/s)
+I (29662) HTTPS_DEMO: Downloaded: 1056768 bytes (1032.0 KB), Instant: 30.3 KB/s (31027 B/s), Average: 39.2 KB/s (40096 B/s)
+I (30667) HTTPS_DEMO: Downloaded: 1089536 bytes (1064.0 KB), Instant: 31.8 KB/s (32600 B/s), Average: 38.9 KB/s (39820 B/s)
+I (31734) HTTPS_DEMO: Downloaded: 1122304 bytes (1096.0 KB), Instant: 30.0 KB/s (30713 B/s), Average: 38.6 KB/s (39479 B/s)
+I (32947) HTTPS_DEMO: Downloaded: 1163264 bytes (1136.0 KB), Instant: 33.0 KB/s (33755 B/s), Average: 38.3 KB/s (39244 B/s)
+I (33977) HTTPS_DEMO: Downloaded: 1196032 bytes (1168.0 KB), Instant: 31.1 KB/s (31820 B/s), Average: 38.1 KB/s (38995 B/s)
+I (35204) HTTPS_DEMO: Downloaded: 1236992 bytes (1208.0 KB), Instant: 32.6 KB/s (33390 B/s), Average: 37.9 KB/s (38780 B/s)
+I (36223) HTTPS_DEMO: Downloaded: 1269760 bytes (1240.0 KB), Instant: 31.4 KB/s (32153 B/s), Average: 37.7 KB/s (38574 B/s)
+I (37278) HTTPS_DEMO: Downloaded: 1302528 bytes (1272.0 KB), Instant: 30.3 KB/s (31057 B/s), Average: 37.4 KB/s (38341 B/s)
+I (38463) HTTPS_DEMO: Downloaded: 1343488 bytes (1312.0 KB), Instant: 33.8 KB/s (34560 B/s), Average: 37.3 KB/s (38213 B/s)
+I (39529) HTTPS_DEMO: Downloaded: 1376256 bytes (1344.0 KB), Instant: 30.0 KB/s (30746 B/s), Average: 37.1 KB/s (37994 B/s)
+I (40735) HTTPS_DEMO: Downloaded: 1417216 bytes (1384.0 KB), Instant: 33.2 KB/s (33970 B/s), Average: 37.0 KB/s (37864 B/s)
+I (41896) HTTPS_DEMO: Downloaded: 1458176 bytes (1424.0 KB), Instant: 34.4 KB/s (35264 B/s), Average: 36.9 KB/s (37786 B/s)
+I (42984) HTTPS_DEMO: Downloaded: 1499136 bytes (1464.0 KB), Instant: 36.8 KB/s (37659 B/s), Average: 36.9 KB/s (37782 B/s)
+I (44071) HTTPS_DEMO: Downloaded: 1540096 bytes (1504.0 KB), Instant: 36.8 KB/s (37672 B/s), Average: 36.9 KB/s (37779 B/s)
+I (46236) HTTPS_DEMO: Downloaded: 1556480 bytes (1520.0 KB), Instant: 7.4 KB/s (7567 B/s), Average: 35.4 KB/s (36256 B/s)
+I (47428) HTTPS_DEMO: Downloaded: 1597440 bytes (1560.0 KB), Instant: 33.6 KB/s (34372 B/s), Average: 35.4 KB/s (36205 B/s)
+I (48642) HTTPS_DEMO: Downloaded: 1638400 bytes (1600.0 KB), Instant: 32.9 KB/s (33736 B/s), Average: 35.3 KB/s (36139 B/s)
+I (49662) HTTPS_DEMO: Downloaded: 1671168 bytes (1632.0 KB), Instant: 31.4 KB/s (32131 B/s), Average: 35.2 KB/s (36050 B/s)
+I (50782) HTTPS_DEMO: Downloaded: 1712128 bytes (1672.0 KB), Instant: 35.7 KB/s (36569 B/s), Average: 35.2 KB/s (36063 B/s)
+I (51950) HTTPS_DEMO: Downloaded: 1753088 bytes (1712.0 KB), Instant: 34.3 KB/s (35078 B/s), Average: 35.2 KB/s (36039 B/s)
+I (52993) HTTPS_DEMO: Downloaded: 1785856 bytes (1744.0 KB), Instant: 30.7 KB/s (31404 B/s), Average: 35.1 KB/s (35942 B/s)
+I (54133) HTTPS_DEMO: Downloaded: 1826816 bytes (1784.0 KB), Instant: 35.1 KB/s (35926 B/s), Average: 35.1 KB/s (35941 B/s)
+I (55149) HTTPS_DEMO: Downloaded: 1859584 bytes (1816.0 KB), Instant: 31.5 KB/s (32260 B/s), Average: 35.0 KB/s (35869 B/s)
+I (56307) HTTPS_DEMO: Downloaded: 1900544 bytes (1856.0 KB), Instant: 34.5 KB/s (35368 B/s), Average: 35.0 KB/s (35858 B/s)
+I (57448) HTTPS_DEMO: Downloaded: 1941504 bytes (1896.0 KB), Instant: 35.1 KB/s (35897 B/s), Average: 35.0 KB/s (35859 B/s)
+I (58589) HTTPS_DEMO: Downloaded: 1982464 bytes (1936.0 KB), Instant: 35.1 KB/s (35901 B/s), Average: 35.0 KB/s (35860 B/s)
+I (59718) HTTPS_DEMO: Downloaded: 2023424 bytes (1976.0 KB), Instant: 35.5 KB/s (36303 B/s), Average: 35.0 KB/s (35869 B/s)
+I (60842) HTTPS_DEMO: Downloaded: 2064384 bytes (2016.0 KB), Instant: 35.6 KB/s (36440 B/s), Average: 35.0 KB/s (35880 B/s)
+I (61945) HTTPS_DEMO: Downloaded: 2105344 bytes (2056.0 KB), Instant: 36.3 KB/s (37120 B/s), Average: 35.1 KB/s (35903 B/s)
+I (63071) HTTPS_DEMO: Downloaded: 2146304 bytes (2096.0 KB), Instant: 35.5 KB/s (36391 B/s), Average: 35.1 KB/s (35912 B/s)
+I (64259) HTTPS_DEMO: Downloaded: 2187264 bytes (2136.0 KB), Instant: 33.6 KB/s (34453 B/s), Average: 35.0 KB/s (35884 B/s)
+I (65295) HTTPS_DEMO: Downloaded: 2220032 bytes (2168.0 KB), Instant: 30.9 KB/s (31641 B/s), Average: 35.0 KB/s (35813 B/s)
+I (66475) HTTPS_DEMO: Downloaded: 2260992 bytes (2208.0 KB), Instant: 33.9 KB/s (34729 B/s), Average: 35.0 KB/s (35793 B/s)
+I (67580) HTTPS_DEMO: Downloaded: 2301952 bytes (2248.0 KB), Instant: 36.2 KB/s (37045 B/s), Average: 35.0 KB/s (35814 B/s)
+I (68754) HTTPS_DEMO: Downloaded: 2342912 bytes (2288.0 KB), Instant: 34.1 KB/s (34908 B/s), Average: 35.0 KB/s (35798 B/s)
+I (69740) HTTPS_DEMO: ===========================================
+I (69740) HTTPS_DEMO: === Download Complete ===
+I (69740) HTTPS_DEMO: ===========================================
+I (69740) HTTPS_DEMO: Total bytes: 2381520 (2325.70 KB, 2.27 MB)
+I (69741) HTTPS_DEMO: Time elapsed: 66.43 seconds
+I (69741) HTTPS_DEMO: Average speed: 35848 B/s (35.01 KB/s, 0.03 MB/s)
+I (69743) HTTPS_DEMO: HTTP download test completed
+I (69743) HTTPS_DEMO: HTTPS Demo completed
+I (69744) UartEthModem: === UART UHCI RX ISR Statistics ===
+I (69744) UartEthModem:   Call count: 1795
+I (69744) UartEthModem:   Total time: 17734 us
+I (69744) UartEthModem:   Average time: 9 us
+I (69744) UartEthModem:   Min time: 9 us
+I (69744) UartEthModem:   Max time: 13 us
+I (69744) UartEthModem: ====================================
+I (69745) HTTPS_DEMO: Task list:
+main            X       1       1224    4
+IDLE0           R       0       720     5
+IDLE1           R       0       712     6
+uart_eth_main   B       10      2204    10
+tiT             B       18      1956    8
+esp_timer       S       22      3352    3
+ipc1            S       1       448     2
+sys_evt         B       20      2476    9
+Tmr Svc         B       1       1248    7
+ipc0            S       24      536     1
+
+I (69746) HTTPS_DEMO: Free SRAM: 317179 bytes, minimal SRAM: 262555 bytes

@@ -1,0 +1,137 @@
+I (35) octal_psram: vendor id    : 0x0d (AP)
+I (35) octal_psram: dev id       : 0x02 (generation 3)
+I (35) octal_psram: density      : 0x03 (64 Mbit)
+I (35) octal_psram: good-die     : 0x01 (Pass)
+I (36) octal_psram: Latency      : 0x01 (Fixed)
+I (36) octal_psram: VCC          : 0x01 (3V)
+I (36) octal_psram: SRF          : 0x01 (Fast Refresh)
+I (36) octal_psram: BurstType    : 0x01 (Hybrid Wrap)
+I (36) octal_psram: BurstLen     : 0x01 (32 Byte)
+I (37) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)
+I (37) octal_psram: DriveStrength: 0x00 (1/1)
+I (38) MSPI Timing: PSRAM timing tuning index: 4
+I (38) esp_psram: Found 8MB PSRAM device
+I (38) esp_psram: Speed: 80MHz
+I (38) cpu_start: Multicore app
+I (47) cpu_start: Pro cpu start user code
+I (47) cpu_start: cpu freq: 240000000 Hz
+I (47) app_init: Application information:
+I (48) app_init: Project name:     quic-client
+I (48) app_init: App version:      e3a7bc9-dirty
+I (48) app_init: Compile time:     Dec  9 2025 18:55:11
+I (48) app_init: ELF file SHA256:  5f527d255...
+I (48) app_init: ESP-IDF:          v5.5.1-418-gf1a1df9b2e
+I (48) efuse_init: Min chip rev:     v0.0
+I (48) efuse_init: Max chip rev:     v0.99 
+I (49) efuse_init: Chip rev:         v0.2
+I (49) heap_init: Initializing. RAM available for dynamic allocation:
+I (49) heap_init: At 3FCAB1F8 len 0003E518 (249 KiB): RAM
+I (49) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+I (49) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+I (49) heap_init: At 600FE030 len 00001FA8 (7 KiB): RTCRAM
+I (50) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator
+I (50) spi_flash: detected chip: winbond
+I (50) spi_flash: flash io: qio
+I (51) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (51) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (0) main_task: Started on CPU1
+I (1) esp_psram: Reserving pool of 64K of internal memory for DMA/internal allocations
+I (1) main_task: Calling app_main()
+I (1) HTTPS_DEMO: HTTPS Demo Starting... Press GPIO1 to restart!!!
+I (4) PMIC: IRQ_EN_0: 0xFF
+I (5) PMIC: IRQ_EN_1: 0xFC
+I (5) PMIC: IRQ_EN_2: 0x5F
+I (6) PMIC: PMIC singleton initialized successfully
+I (6) HTTPS_DEMO: Initializing reset button on GPIO1...
+I (6) HTTPS_DEMO: Reset button initialized, low level will trigger system restart
+I (7) HTTPS_DEMO: Running in WiFi mode
+I (7) HTTPS_DEMO: Initializing WiFi...
+I (28) WifiManager: Initializing...
+I (29) pp: pp rom version: e7ae62f
+I (29) net80211: net80211 rom version: e7ae62f
+I (31) wifi:wifi driver task: 3fcedd1c, prio:23, stack:6656, core=0
+I (116) wifi:wifi firmware version: 30d89ec
+I (116) wifi:wifi certification version: v7.0
+I (116) wifi:config NVS flash: disabled
+I (116) wifi:config nano formatting: disabled
+I (117) wifi:Init data frame dynamic rx buffer num: 32
+I (117) wifi:Init static rx mgmt buffer num: 5
+I (117) wifi:Init management short buffer num: 32
+I (117) wifi:Init dynamic tx buffer num: 32
+I (117) wifi:Init static tx FG buffer num: 2
+I (117) wifi:Init static rx buffer size: 1600
+I (118) wifi:Init static rx buffer num: 10
+I (118) wifi:Init dynamic rx buffer num: 32
+I (118) wifi_init: rx ba win: 6
+I (119) wifi_init: accept mbox: 6
+I (119) wifi_init: tcpip mbox: 32
+I (119) wifi_init: udp mbox: 12
+I (119) wifi_init: tcp mbox: 12
+I (119) wifi_init: tcp tx win: 5760
+I (119) wifi_init: tcp rx win: 11520
+I (119) wifi_init: tcp mss: 1440
+I (119) wifi_init: WiFi IRAM OP enabled
+I (119) wifi_init: WiFi RX IRAM OP enabled
+I (119) wifi_init: LWIP IRAM OP enabled
+I (120) WifiManager: Initialized
+I (121) HTTPS_DEMO: Found 2 saved WiFi credential(s), starting station mode
+I (122) WifiManager: Starting station
+I (122) phy_init: phy_version 701,f4f1da3a,Mar  3 2025,15:50:10
+I (154) wifi:mode : sta (b8:f8:62:e9:76:40)
+I (155) wifi:enable tsf
+I (155) HTTPS_DEMO: Waiting for WiFi connection...
+I (157) HTTPS_DEMO: WiFi: Scanning for networks...
+I (2563) WifiStation: Found AP: KFC, BSSID: c2:3d:2a:62:7b:3c, RSSI: -55, Channel: 1, Authmode: 3
+I (2563) WifiStation: Found AP: KFC, BSSID: c2:9c:76:66:7b:3c, RSSI: -63, Channel: 1, Authmode: 3
+I (2564) WifiStation: Found AP: KFC, BSSID: 62:2d:1a:66:7a:3c, RSSI: -63, Channel: 1, Authmode: 3
+I (2564) HTTPS_DEMO: WiFi: Connecting to network...
+W (2564) wifi:Password length matches WPA2 standards, authmode threshold changes from OPEN to WPA2
+I (2634) wifi:new:<1,0>, old:<1,0>, ap:<255,255>, sta:<1,0>, prof:1, snd_ch_cfg:0x0
+I (2634) wifi:state: init -> auth (0xb0)
+I (2647) wifi:state: auth -> assoc (0x0)
+I (2653) wifi:state: assoc -> run (0x10)
+I (2670) wifi:connected with KFC, aid = 1, channel 1, BW20, bssid = c2:3d:2a:62:7b:3c
+I (2670) wifi:security: WPA2-PSK, phy: bgn, rssi: -57
+I (2670) wifi:pm start, type: 1
+
+I (2671) wifi:dp: 1, bi: 102400, li: 10, scale listen interval from 1024000 us to 1024000 us
+I (2671) wifi:set rx beacon pti, rx_bcn_pti: 0, bcn_timeout: 25000, mt_pti: 0, mt_time: 10000
+I (2703) wifi:AP's beacon interval = 102400 us, DTIM period = 1
+I (3755) esp_netif_handlers: sta ip: 192.168.2.230, mask: 255.255.255.0, gw: 192.168.2.1
+I (3755) WifiStation: Got IP: 192.168.2.230
+I (3755) HTTPS_DEMO: WiFi: Connected successfully!
+I (3755) WifiStation: Setting WiFi power save level: PERFORMANCE (NONE)
+I (3756) wifi:Set ps type: 0, coexist: 0
+
+I (3756) HTTPS_DEMO: WiFi connected! SSID: KFC, IP: 192.168.2.230
+I (3757) HTTPS_DEMO: ===========================================
+I (3757) HTTPS_DEMO: === HTTP Client Download Speed Test ===
+I (3757) HTTPS_DEMO: ===========================================
+I (3757) HTTPS_DEMO: URL: https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/firmwares/v1.9.4_xmini-c3/xiaozhi.bin
+I (3780) wifi:<ba-add>idx:0 (ifx:0, c2:3d:2a:62:7b:3c), tid:0, ssn:1, winSize:64
+I (3941) esp-x509-crt-bundle: Certificate validated
+I (4196) HTTPS_DEMO: HTTP Status: 200, Content-Length: 2381520
+I (4197) HTTPS_DEMO: Starting download...
+I (5197) HTTPS_DEMO: Downloaded: 1024000 bytes (1000.0 KB), Instant: 999.6 KB/s (1023544 B/s), Average: 999.6 KB/s (1023544 B/s)
+I (6202) HTTPS_DEMO: Downloaded: 2015232 bytes (1968.0 KB), Instant: 963.4 KB/s (986564 B/s), Average: 981.5 KB/s (1005014 B/s)
+I (6566) HTTPS_DEMO: ===========================================
+I (6567) HTTPS_DEMO: === Download Complete ===
+I (6567) HTTPS_DEMO: ===========================================
+I (6567) HTTPS_DEMO: Total bytes: 2381520 (2325.70 KB, 2.27 MB)
+I (6567) HTTPS_DEMO: Time elapsed: 2.37 seconds
+I (6567) HTTPS_DEMO: Average speed: 1004986 B/s (981.43 KB/s, 0.96 MB/s)
+I (6569) HTTPS_DEMO: HTTP download test completed
+I (6569) HTTPS_DEMO: HTTPS Demo completed
+I (6570) HTTPS_DEMO: Task list:
+main            X       1       1224    4
+IDLE0           R       0       720     5
+IDLE1           R       0       728     6
+tiT             B       18      1864    9
+ipc0            S       24      536     1
+ipc1            S       24      448     2
+esp_timer       S       22      3144    3
+sys_evt         B       20      1416    8
+wifi            B       23      3508    10
+Tmr Svc         B       1       1360    7
+
+I (6571) HTTPS_DEMO: Free SRAM: 232127 bytes, minimal SRAM: 164207 bytes

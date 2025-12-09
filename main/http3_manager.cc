@@ -513,6 +513,10 @@ void Http3Manager::RunEventLoop() {
         } else if (next_timer_ms > kDefaultWaitMs) {
             next_timer_ms = kDefaultWaitMs;
         }
+
+        if (config_.enable_debug) {
+            ESP_LOGW(TAG, "Waiting for events or timeout, next_timer_ms=%d", next_timer_ms);
+        }
         
         EventBits_t bits = xEventGroupWaitBits(
             event_group_,

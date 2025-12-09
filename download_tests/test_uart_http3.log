@@ -1,0 +1,175 @@
+I (32) octal_psram: vendor id    : 0x0d (AP)
+I (32) octal_psram: dev id       : 0x02 (generation 3)
+I (32) octal_psram: density      : 0x03 (64 Mbit)
+I (32) octal_psram: good-die     : 0x01 (Pass)
+I (33) octal_psram: Latency      : 0x01 (Fixed)
+I (33) octal_psram: VCC          : 0x01 (3V)
+I (33) octal_psram: SRF          : 0x01 (Fast Refresh)
+I (33) octal_psram: BurstType    : 0x01 (Hybrid Wrap)
+I (33) octal_psram: BurstLen     : 0x01 (32 Byte)
+I (34) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)
+I (34) octal_psram: DriveStrength: 0x00 (1/1)
+I (35) MSPI Timing: PSRAM timing tuning index: 4
+I (35) esp_psram: Found 8MB PSRAM device
+I (35) esp_psram: Speed: 80MHz
+I (35) cpu_start: Multicore app
+I (44) cpu_start: Pro cpu start user code
+I (44) cpu_start: cpu freq: 240000000 Hz
+I (44) app_init: Application information:
+I (45) app_init: Project name:     quic-client
+I (45) app_init: App version:      e3a7bc9-dirty
+I (45) app_init: Compile time:     Dec  9 2025 17:06:59
+I (45) app_init: ELF file SHA256:  6be5c0a8a...
+I (45) app_init: ESP-IDF:          v5.5.1-418-gf1a1df9b2e
+I (45) efuse_init: Min chip rev:     v0.0
+I (45) efuse_init: Max chip rev:     v0.99 
+I (45) efuse_init: Chip rev:         v0.2
+I (46) heap_init: Initializing. RAM available for dynamic allocation:
+I (46) heap_init: At 3FC9D008 len 0004C708 (305 KiB): RAM
+I (46) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+I (46) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+I (46) heap_init: At 600FE030 len 00001FA8 (7 KiB): RTCRAM
+I (47) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator
+I (47) spi_flash: detected chip: winbond
+I (47) spi_flash: flash io: qio
+I (48) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (48) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (0) main_task: Started on CPU1
+I (1) esp_psram: Reserving pool of 64K of internal memory for DMA/internal allocations
+I (1) main_task: Calling app_main()
+I (1) HTTPS_DEMO: HTTPS Demo Starting... Press GPIO1 to restart!!!
+I (4) PMIC: IRQ_EN_0: 0xFF
+I (5) PMIC: IRQ_EN_1: 0xFC
+I (5) PMIC: IRQ_EN_2: 0x5F
+I (5) PMIC: PMIC singleton initialized successfully
+I (6) HTTPS_DEMO: Initializing reset button on GPIO1...
+I (6) HTTPS_DEMO: Reset button initialized, low level will trigger system restart
+I (7) HTTPS_DEMO: Running in 4G mode
+I (7) HTTPS_DEMO: Initializing 4G Network...
+I (7) HTTPS_DEMO: Initializing Modem Hardware...
+I (7) HTTPS_DEMO: RI pin is low, powering on modem
+I (507) HTTPS_DEMO: Modem hardware initialized
+I (508) UartEthModem: Starting UartEthModem...
+I (509) UartUhci: UHCI 0 initialized (UART 1), RX pool: 4 x 1600 bytes
+I (509) UartEthModem: Detecting modem...
+I (510) UartEthModem: UartEthModem starting asynchronously...
+I (510) HTTPS_DEMO: Waiting for network ready...
+I (1073) UartEthModem: Checking network configuration...
+I (1076) UartEthModem: Querying modem info...
+I (1081) UartEthModem: Checking SIM card...
+I (1083) UartEthModem: Waiting for network registration...
+I (1083) UartEthModem: Network event: Disconnected -> Connecting
+I (1083) HTTPS_DEMO: Network event: Connecting
+I (1086) UartEthModem: Starting network device...
+I (1087) UartEthModem: Starting handshake...
+I (1089) UartEthModem: Handshake successful
+I (1091) UartEthModem: Modem initialization complete!
+I (1091) iot_eth: IoT ETH Version: 0.1.0
+I (1091) iot_eth.netif_glue: b8:f8:62:e9:76:42
+I (1092) iot_eth.netif_glue: ethernet attached to netif
+I (1092) iot_eth.netif_glue: eth_action_handle: 0x3fcb5598, 0x3c07cb3c, 0, 0x3fcb5630, 0x3fceee0c
+I (1092) iot_eth: uart_eth: MAC address: B8:F8:62:E9:76:42
+I (1092) iot_eth.netif_glue: eth_action_handle: 0x3fcb5598, 0x3c07cb3c, 2, 0x3fcb5664, 0x3fceee0c
+I (2106) iot_eth.netif_glue: Ethernet Got IP Address
+I (2106) iot_eth.netif_glue: ~~~~~~~~~~~
+I (2106) iot_eth.netif_glue: ETHIP:192.168.10.2
+I (2106) iot_eth.netif_glue: ETHMASK:255.255.255.0
+I (2106) iot_eth.netif_glue: ETHGW:192.168.10.1
+I (2106) iot_eth.netif_glue: ~~~~~~~~~~~
+I (2106) UartEthModem: Network event: Connecting -> Connected
+I (2107) HTTPS_DEMO: Network event: Connected
+I (2107) HTTPS_DEMO: === 4G Modem Info ===
+I (2107) HTTPS_DEMO:   IMEI:     860608076252674
+I (2107) HTTPS_DEMO:   ICCID:    89860818102370057799
+I (2107) HTTPS_DEMO:   Carrier:  46000
+I (2109) HTTPS_DEMO:   Revision: XJ_EC716S_Modem_AI02_V0201.001
+I (2109) HTTPS_DEMO:   Signal:   16 (CSQ)
+I (2113) HTTPS_DEMO:   Cell:     TAC=2495, CI=009A8142, AcT=7
+I (2113) HTTPS_DEMO: 4G Network ready!
+I (2113) QUIC_TEST: ===========================================
+I (2113) QUIC_TEST: === HTTP3 Download Speed Test ===
+I (2113) QUIC_TEST: ===========================================
+I (2114) QUIC_TEST: Target: https://api.tenclass.net:443/pocket-sage/firmwares/pocket-sage.bin
+I (2114) Http3Manager: Initializing HTTP/3 Manager for api.tenclass.net:443
+I (2114) QUIC_TEST: Establishing QUIC connection...
+I (2114) Http3Manager: Establishing QUIC connection...
+I (2324) Http3Manager: Resolved api.tenclass.net to 112.74.84.224
+I (2325) Http3Manager: Tasks started (UDP recv + event loop)
+I (2326) Http3Manager: Starting QUIC handshake...
+I (2929) Http3Manager: QUIC connection established
+I (2929) QUIC_TEST: Connection established in 815.30 ms
+I (2930) QUIC_TEST: 
+I (2930) QUIC_TEST: Starting download...
+I (2932) Http3Manager: Opened stream 0 for GET /pocket-sage/firmwares/pocket-sage.bin
+I (2935) Http3Manager: Write complete on stream 0: 0 bytes
+I (3066) Http3Manager: Response on stream 0: status=200
+I (3066) QUIC_TEST: [Stream 0] Status: 200
+I (3066) QUIC_TEST: [Stream 0] Content-Length: 2424272
+I (3932) QUIC_TEST: Downloaded: 201377 bytes (196.7 KB), Instant: 196.3 KB/s (201035 B/s), Average: 196.3 KB/s (201035 B/s)
+I (4932) QUIC_TEST: Downloaded: 420729 bytes (410.9 KB), Instant: 214.2 KB/s (219320 B/s), Average: 205.2 KB/s (210170 B/s)
+I (5933) QUIC_TEST: Downloaded: 633735 bytes (618.9 KB), Instant: 207.9 KB/s (212860 B/s), Average: 206.1 KB/s (211067 B/s)
+I (6936) QUIC_TEST: Downloaded: 845523 bytes (825.7 KB), Instant: 206.2 KB/s (211110 B/s), Average: 206.1 KB/s (211077 B/s)
+I (7936) QUIC_TEST: Downloaded: 1058217 bytes (1033.4 KB), Instant: 207.7 KB/s (212661 B/s), Average: 206.4 KB/s (211394 B/s)
+I (8936) QUIC_TEST: Downloaded: 1269929 bytes (1240.2 KB), Instant: 206.7 KB/s (211704 B/s), Average: 206.5 KB/s (211445 B/s)
+I (9939) QUIC_TEST: Downloaded: 1482049 bytes (1447.3 KB), Instant: 206.6 KB/s (211547 B/s), Average: 206.5 KB/s (211460 B/s)
+I (10940) QUIC_TEST: Downloaded: 1693505 bytes (1653.8 KB), Instant: 206.2 KB/s (211116 B/s), Average: 206.5 KB/s (211417 B/s)
+I (11943) QUIC_TEST: Downloaded: 1908962 bytes (1864.2 KB), Instant: 209.8 KB/s (214874 B/s), Average: 206.8 KB/s (211802 B/s)
+I (12947) QUIC_TEST: Downloaded: 2123125 bytes (2073.4 KB), Instant: 208.3 KB/s (213307 B/s), Average: 207.0 KB/s (211952 B/s)
+I (13951) QUIC_TEST: Downloaded: 2337671 bytes (2282.9 KB), Instant: 208.7 KB/s (213686 B/s), Average: 207.1 KB/s (212110 B/s)
+I (14359) QUIC_TEST: [Stream 0] Download complete
+I (14360) QUIC_TEST: 
+I (14361) QUIC_TEST: ===========================================
+I (14361) QUIC_TEST: === Download Speed Test Results ===
+I (14362) QUIC_TEST: ===========================================
+I (14362) QUIC_TEST: URL: https://api.tenclass.net:443/pocket-sage/firmwares/pocket-sage.bin
+I (14363) QUIC_TEST: Status: 200
+I (14363) QUIC_TEST: Success: Yes
+I (14364) QUIC_TEST: 
+I (14364) QUIC_TEST: --- Timing ---
+I (14365) QUIC_TEST: Connection time: 815.30 ms
+I (14366) QUIC_TEST: Time to first byte: 136.47 ms
+I (14367) QUIC_TEST: Total download time: 11429.36 ms
+I (14368) QUIC_TEST: 
+I (14369) QUIC_TEST: --- Data ---
+I (14369) QUIC_TEST: Expected size: 2424272 bytes
+I (14369) QUIC_TEST: Downloaded: 2424272 bytes (2367.45 KB, 2.31 MB)
+I (14371) QUIC_TEST: Chunks received: 2529
+I (14372) QUIC_TEST: 
+I (14372) QUIC_TEST: --- Speed ---
+I (14372) QUIC_TEST: Average speed: 207.14 KB/s (0.20 MB/s)
+I (14374) QUIC_TEST: Average speed: 1657.10 Kbps (1.62 Mbps)
+I (14376) QUIC_TEST: 
+I (14376) QUIC_TEST: --- Connection Stats ---
+I (14377) QUIC_TEST: Packets sent: 2259
+I (14377) QUIC_TEST: Packets received: 3301
+I (14378) QUIC_TEST: Total bytes sent: 195910
+I (14378) QUIC_TEST: Total bytes received: 2543565
+I (14378) QUIC_TEST: RTT: 255 ms
+I (14379) QUIC_TEST: 
+I (14379) QUIC_TEST: ===========================================
+I (14380) Http3Manager: Deinitializing HTTP/3 Manager
+I (14380) Http3Manager: Stopping tasks
+I (14391) Http3Manager: Closing QUIC connection
+W (14392) Http3Manager: QUIC disconnected: code=0, reason=Client disconnect
+I (14392) Http3Manager: HTTP/3 Manager deinitialized
+I (14393) HTTPS_DEMO: HTTPS Demo completed
+I (14393) UartEthModem: === UART UHCI RX ISR Statistics ===
+I (14393) UartEthModem:   Call count: 3332
+I (14393) UartEthModem:   Total time: 32936 us
+I (14393) UartEthModem:   Average time: 9 us
+I (14393) UartEthModem:   Min time: 7 us
+I (14393) UartEthModem:   Max time: 18 us
+I (14393) UartEthModem: ====================================
+I (14394) HTTPS_DEMO: Task list:
+main            X       1       1008    4
+IDLE0           R       0       728     5
+IDLE1           R       0       720     6
+tiT             B       18      1956    8
+uart_eth_main   B       10      2204    10
+esp_timer       S       22      3344    3
+ipc1            S       1       472     2
+sys_evt         B       20      2476    9
+Tmr Svc         B       1       1256    7
+ipc0            S       24      528     1
+
+I (14395) HTTPS_DEMO: Free SRAM: 320675 bytes, minimal SRAM: 274195 bytes

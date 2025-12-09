@@ -24,6 +24,8 @@
 #include "uart_eth_modem/uart_eth_modem.h"
 #include "pmic/pmic.h"
 #include "quic_test.h"
+#include "system_info.h"
+
 
 // 选择网络模式：1 = WiFi模式, 0 = 4G模式
 #define USE_WIFI_MODE 0
@@ -340,6 +342,8 @@ static constexpr uint32_t kEventWifiDisconnected = (1 << 2);
         ESP_LOGE(TAG, "WiFi connection timeout");
         return false;
     }
+
+    wifi_manager.SetPowerSaveLevel(WifiPowerSaveLevel::PERFORMANCE);
     
     ESP_LOGI(TAG, "WiFi connected! SSID: %s, IP: %s", 
              wifi_manager.GetSsid().c_str(), 
@@ -501,9 +505,20 @@ extern "C" void app_main(void) {
     // TestHttp3ManagerSharedConnection("api.tenclass.net", 443);
     
     // HTTP 下载速度测试
-    TestHttpClientDownload("https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/firmwares/v1.9.4_xmini-c3/xiaozhi.bin");
+    const char* test_url = "https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/firmwares/v1.9.4_xmini-c3/xiaozhi.bin";
+    TestHttpClientDownload(test_url);
+
+        // 测试下载速度
+    // TestHttp3DownloadSpeed("api.tenclass.net", 443, "/pocket-sage/firmwares/pocket-sage.bin");
     
     ESP_LOGI(TAG, "HTTPS Demo completed");
+
+#if !USE_WIFI_MODE
+    // Print UART UHCI RX ISR statistics
+    if (g_modem) {
+        g_modem->PrintStatistics();
+    }
+#endif
 
     static char buffer[1024];
     vTaskList(buffer);

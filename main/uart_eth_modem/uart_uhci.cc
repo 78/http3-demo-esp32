@@ -11,6 +11,7 @@
 #include "esp_check.h"
 #include "esp_attr.h"
 #include "esp_cache.h"
+#include "esp_timer.h"
 #include "esp_memory_utils.h"
 #include "esp_private/gdma.h"
 #include "esp_private/gdma_link.h"
@@ -607,6 +608,9 @@ bool UartUhci::HandleGdmaTxDone() {
 }
 
 bool UartUhci::HandleGdmaRxDone(bool is_eof) {
+    // Record start time for statistics
+    int64_t start_time_us = esp_timer_get_time();
+
     bool need_yield = false;
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
@@ -711,5 +715,43 @@ bool UartUhci::HandleGdmaRxDone(bool is_eof) {
         gdma_start(rx_dma_chan_, gdma_link_get_head_addr(rx_dma_link_));
     }
 
+    // Update statistics
+    int64_t end_time_us = esp_timer_get_time();
+    uint32_t elapsed_us = static_cast<uint32_t>(end_time_us - start_time_us);
+    
+    rx_isr_call_count_.fetch_add(1, std::memory_order_relaxed);
+    rx_isr_total_time_us_.fetch_add(elapsed_us, std::memory_order_relaxed);
+    
+    // Update min/max using compare-exchange
+    uint32_t current_min = rx_isr_min_time_us_.load(std::memory_order_relaxed);
+    while (elapsed_us < current_min && 
+           !rx_isr_min_time_us_.compare_exchange_weak(current_min, elapsed_us, std::memory_order_relaxed));
+    
+    uint32_t current_max = rx_isr_max_time_us_.load(std::memory_order_relaxed);
+    while (elapsed_us > current_max && 
+           !rx_isr_max_time_us_.compare_exchange_weak(current_max, elapsed_us, std::memory_order_relaxed));
+
     return need_yield;
+}
+
+UartUhci::RxIsrStatistics UartUhci::GetRxIsrStatistics() const {
+    RxIsrStatistics stats = {};
+    stats.call_count = rx_isr_call_count_.load(std::memory_order_relaxed);
+    stats.total_time_us = rx_isr_total_time_us_.load(std::memory_order_relaxed);
+    stats.min_time_us = rx_isr_min_time_us_.load(std::memory_order_relaxed);
+    stats.max_time_us = rx_isr_max_time_us_.load(std::memory_order_relaxed);
+    
+    // If no calls yet, set min to 0 instead of UINT32_MAX
+    if (stats.call_count == 0) {
+        stats.min_time_us = 0;
+    }
+    
+    return stats;
+}
+
+void UartUhci::ResetRxIsrStatistics() {
+    rx_isr_call_count_.store(0, std::memory_order_relaxed);
+    rx_isr_total_time_us_.store(0, std::memory_order_relaxed);
+    rx_isr_min_time_us_.store(UINT32_MAX, std::memory_order_relaxed);
+    rx_isr_max_time_us_.store(0, std::memory_order_relaxed);
 }

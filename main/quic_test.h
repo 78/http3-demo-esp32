@@ -29,3 +29,14 @@ const uint8_t* GetTestOggData();
  */
 size_t GetTestOggSize();
 
+/**
+ * Test HTTP3 download speed
+ * 
+ * Downloads a file from the specified URL and measures the speed.
+ * 
+ * @param hostname Server hostname
+ * @param port Server port
+ * @param path URL path to download (e.g., "/testfile.bin")
+ */
+void TestHttp3DownloadSpeed(const char* hostname, uint16_t port, const char* path);
+
