@@ -1346,6 +1346,13 @@ esp_err_t UartEthModem::RunInitSequence() {
         return ret;
     }
 
+    ret = SendAt("AT+XJCFG=netPortBaudRate,3000000", resp, 1000);
+    if (ret != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to set network port baud rate");
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+        return ret;
+    }
+
     ESP_LOGI(kTag, "Checking network configuration...");
     ret = SendAt("AT+ECNETCFG?", resp, 1000);
     if (ret != ESP_OK || resp.find("+ECNETCFG: \"nat\",1") == std::string::npos) {

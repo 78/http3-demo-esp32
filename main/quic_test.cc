@@ -1,12 +1,15 @@
 #include "quic_test.h"
-#include "http3_manager.h"
 #include <esp_log.h>
+#include "esp_http3.h"
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <string>
 #include <vector>
+#include <esp_ota_ops.h>
+#include <esp_app_desc.h>
+#include <esp_image_format.h>
+#include <cstring>
 
 static const char *TAG = "QUIC_TEST";
 
@@ -28,20 +31,18 @@ size_t GetTestOggSize() {
  * Test flow:
  * 1. Establish connection
  * 2. Test concurrent requests (GET / and GET /pocket-sage/health)
- * 3. Wait 30 seconds
+ * 3. Wait 5 seconds
  * 4. Test ChatStream (POST /pocket-sage/chat/stream)
  * 5. Don't close connection, wait for server to close
  */
 void TestHttp3ManagerSharedConnection(const char* hostname, uint16_t port) {
     ESP_LOGI(TAG, "===========================================");
-    ESP_LOGI(TAG, "=== Http3Manager Shared Connection Test ===");
+    ESP_LOGI(TAG, "=== Http3Client Shared Connection Test ===");
     ESP_LOGI(TAG, "===========================================");
     ESP_LOGI(TAG, "Target: %s:%u", hostname, port);
     
-    // 1. Initialize Http3Manager
-    auto& manager = Http3Manager::GetInstance();
-    
-    Http3ManagerConfig config;
+    // 1. Initialize Http3Client
+    Http3ClientConfig config;
     config.hostname = hostname;
     config.port = port;
     config.connect_timeout_ms = 10000;
@@ -49,19 +50,22 @@ void TestHttp3ManagerSharedConnection(const char* hostname, uint16_t port) {
     config.idle_timeout_ms = 120000;  // 2 minutes idle timeout
     config.enable_debug = true;
     
-    if (!manager.Init(config)) {
-        ESP_LOGE(TAG, "Failed to init Http3Manager");
-        return;
-    }
-    
-    manager.SetIdentifiers("test-device-12345", "test-client-001");
+    Http3Client client(config);
     
     // 2. Establish connection
     ESP_LOGI(TAG, "Establishing QUIC connection...");
-    if (!manager.EnsureConnected(20000)) {
-        ESP_LOGE(TAG, "Failed to connect");
-        manager.Deinit();
-        return;
+    if (!client.IsConnected()) {
+        // For Http3Client, connection is established on first Open() call
+        // Let's try opening a simple request
+        Http3Request test_req;
+        test_req.method = "GET";
+        test_req.path = "/";
+        auto test_stream = client.Open(test_req, 20000);
+        if (!test_stream) {
+            ESP_LOGE(TAG, "Failed to connect");
+            return;
+        }
+        test_stream->Close();
     }
     ESP_LOGI(TAG, "Connection established!");
     
@@ -73,88 +77,69 @@ void TestHttp3ManagerSharedConnection(const char* hostname, uint16_t port) {
     ESP_LOGI(TAG, "Phase 1: Testing Concurrent Requests");
     ESP_LOGI(TAG, "=========================================");
     
-    // Track concurrent request completion status
-    SemaphoreHandle_t req1_sem = xSemaphoreCreateBinary();
-    SemaphoreHandle_t req2_sem = xSemaphoreCreateBinary();
     int req1_status = 0, req2_status = 0;
     std::string req1_body, req2_body;
+    bool req1_success = false, req2_success = false;
     
-    // Send request 1: GET /
+    // Request 1: GET / (using separate synchronous call for concurrency)
     Http3Request req1;
     req1.method = "GET";
     req1.path = "/";
     
-    Http3StreamCallbacks cb1;
-    cb1.on_headers = [&](int stream_id, int status, const auto& headers) {
-        ESP_LOGI(TAG, "[Stream %d] GET / - Status: %d", stream_id, status);
-        req1_status = status;
-    };
-    cb1.on_data = [&](int stream_id, const uint8_t* data, size_t len, bool fin) {
-        if (data && len > 0) {
-            req1_body.append(reinterpret_cast<const char*>(data), len);
+    auto stream1 = client.Open(req1, 15000);
+    if (stream1 && stream1->IsValid()) {
+        req1_status = stream1->GetStatus(15000);
+        req1_success = true;
+        
+        ESP_LOGI(TAG, "[Stream %d] GET / - Status: %d", stream1->GetStreamId(), req1_status);
+        
+        // Read response body
+        uint8_t buffer[1024];
+        int n;
+        while ((n = stream1->Read(buffer, sizeof(buffer), 5000)) > 0) {
+            req1_body.append(reinterpret_cast<const char*>(buffer), n);
         }
-    };
-    cb1.on_complete = [&](int stream_id, bool success, const std::string& error) {
-        ESP_LOGI(TAG, "[Stream %d] GET / - Complete: %s", stream_id, success ? "OK" : error.c_str());
-        xSemaphoreGive(req1_sem);
-    };
-    
-    int stream1 = manager.OpenStream(req1, cb1);
-    if (stream1 >= 0) {
-        manager.FinishStream(stream1);  // No body for GET
-        ESP_LOGI(TAG, "Request 1 (GET /) sent on stream %d", stream1);
+        
+        ESP_LOGI(TAG, "[Stream %d] GET / - Complete (body size: %zu)", stream1->GetStreamId(), req1_body.size());
     } else {
-        ESP_LOGE(TAG, "Failed to open stream for request 1");
+        ESP_LOGE(TAG, "Failed to open GET / request");
+        req1_success = false;
     }
     
-    // Send request 2: GET /pocket-sage/health
+    // Request 2: GET /pocket-sage/health
     Http3Request req2;
     req2.method = "GET";
     req2.path = "/pocket-sage/health";
     
-    Http3StreamCallbacks cb2;
-    cb2.on_headers = [&](int stream_id, int status, const auto& headers) {
-        ESP_LOGI(TAG, "[Stream %d] GET /health - Status: %d", stream_id, status);
-        req2_status = status;
-    };
-    cb2.on_data = [&](int stream_id, const uint8_t* data, size_t len, bool fin) {
-        if (data && len > 0) {
-            req2_body.append(reinterpret_cast<const char*>(data), len);
+    auto stream2 = client.Open(req2, 15000);
+    if (stream2 && stream2->IsValid()) {
+        req2_status = stream2->GetStatus(15000);
+        req2_success = true;
+        
+        ESP_LOGI(TAG, "[Stream %d] GET /health - Status: %d", stream2->GetStreamId(), req2_status);
+        
+        // Read response body
+        uint8_t buffer[1024];
+        int n;
+        while ((n = stream2->Read(buffer, sizeof(buffer), 5000)) > 0) {
+            req2_body.append(reinterpret_cast<const char*>(buffer), n);
         }
-    };
-    cb2.on_complete = [&](int stream_id, bool success, const std::string& error) {
-        ESP_LOGI(TAG, "[Stream %d] GET /health - Complete: %s", stream_id, success ? "OK" : error.c_str());
-        xSemaphoreGive(req2_sem);
-    };
-    
-    int stream2 = manager.OpenStream(req2, cb2);
-    if (stream2 >= 0) {
-        manager.FinishStream(stream2);  // No body for GET
-        ESP_LOGI(TAG, "Request 2 (GET /health) sent on stream %d", stream2);
+        
+        ESP_LOGI(TAG, "[Stream %d] GET /health - Complete (body size: %zu)", stream2->GetStreamId(), req2_body.size());
     } else {
-        ESP_LOGE(TAG, "Failed to open stream for request 2");
+        ESP_LOGE(TAG, "Failed to open GET /health request");
+        req2_success = false;
     }
-    
-    // Wait for both requests to complete
-    ESP_LOGI(TAG, "Waiting for concurrent responses...");
-    bool req1_done = xSemaphoreTake(req1_sem, pdMS_TO_TICKS(15000)) == pdTRUE;
-    bool req2_done = xSemaphoreTake(req2_sem, pdMS_TO_TICKS(15000)) == pdTRUE;
-    
-    vSemaphoreDelete(req1_sem);
-    vSemaphoreDelete(req2_sem);
-    
-    // Cleanup streams
-    if (stream1 >= 0) manager.CleanupStream(stream1);
-    if (stream2 >= 0) manager.CleanupStream(stream2);
     
     // Print concurrent request results
     ESP_LOGI(TAG, "--- Concurrent Request Results ---");
-    ESP_LOGI(TAG, "Request 1 (GET /): %s, Status=%d", req1_done ? "Done" : "Timeout", req1_status);
-    ESP_LOGI(TAG, "Request 2 (GET /health): %s, Status=%d", req2_done ? "Done" : "Timeout", req2_status);
+    ESP_LOGI(TAG, "Request 1 (GET /): %s, Status=%d, Body size=%zu", 
+             req1_success ? "Success" : "Failed", req1_status, req1_body.size());
+    ESP_LOGI(TAG, "Request 2 (GET /health): %s, Status=%d, Body size=%zu", 
+             req2_success ? "Success" : "Failed", req2_status, req2_body.size());
     
-    if (!manager.IsConnected()) {
+    if (!client.IsConnected()) {
         ESP_LOGE(TAG, "Connection lost, aborting test");
-        manager.Deinit();
         return;
     }
     
@@ -166,14 +151,13 @@ void TestHttp3ManagerSharedConnection(const char* hostname, uint16_t port) {
     ESP_LOGI(TAG, "Phase 2: Waiting 5 seconds");
     ESP_LOGI(TAG, "=========================================");
     
-    for (int waited = 0; waited < 5 && manager.IsConnected(); waited += 1) {
+    for (int waited = 0; waited < 5 && client.IsConnected(); waited += 1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-        ESP_LOGI(TAG, "  Waited %d seconds...", waited + 5);
+        ESP_LOGI(TAG, "  Waited %d seconds...", waited + 1);
     }
     
-    if (!manager.IsConnected()) {
+    if (!client.IsConnected()) {
         ESP_LOGE(TAG, "Connection lost during wait, aborting test");
-        manager.Deinit();
         return;
     }
     
@@ -191,11 +175,6 @@ void TestHttp3ManagerSharedConnection(const char* hostname, uint16_t port) {
     size_t audio_size = GetTestOggSize();
     ESP_LOGI(TAG, "Audio file size: %zu bytes", audio_size);
     
-    SemaphoreHandle_t chat_sem = xSemaphoreCreateBinary();
-    int chat_status = 0;
-    std::string chat_body;
-    bool chat_success = false;
-    
     Http3Request chat_req;
     chat_req.method = "POST";
     chat_req.path = "/pocket-sage/chat/stream";
@@ -207,52 +186,44 @@ void TestHttp3ManagerSharedConnection(const char* hostname, uint16_t port) {
         {"accept", "text/plain"},
     };
     
-    Http3StreamCallbacks chat_cb;
-    chat_cb.on_headers = [&](int stream_id, int status, const auto& headers) {
-        ESP_LOGI(TAG, "[Stream %d] ChatStream - Status: %d", stream_id, status);
-        chat_status = status;
-    };
-    chat_cb.on_data = [&](int stream_id, const uint8_t* data, size_t len, bool fin) {
-        if (data && len > 0) {
-            std::string chunk(reinterpret_cast<const char*>(data), len);
+    auto chat_stream = client.Open(chat_req, 30000);
+    if (chat_stream && chat_stream->IsValid()) {
+        ESP_LOGI(TAG, "ChatStream opened: stream %d", chat_stream->GetStreamId());
+        
+        // Upload audio data
+        ESP_LOGI(TAG, "Uploading audio data (%zu bytes)...", audio_size);
+        int write_result = chat_stream->Write(audio_data, audio_size, 60000);
+        if (write_result > 0) {
+            ESP_LOGI(TAG, "Wrote %d bytes", write_result);
+        } else if (write_result < 0) {
+            ESP_LOGE(TAG, "Write failed: %s", chat_stream->GetError().c_str());
+        }
+        
+        // Finish sending
+        if (chat_stream->Finish()) {
+            ESP_LOGI(TAG, "Upload complete");
+        } else {
+            ESP_LOGE(TAG, "Failed to finish stream");
+        }
+        
+        // Read response
+        std::string chat_body;
+        ESP_LOGI(TAG, "Waiting for ChatStream response...");
+        uint8_t buffer[1024];
+        int n;
+        while ((n = chat_stream->Read(buffer, sizeof(buffer), 5000)) > 0) {
+            std::string chunk(reinterpret_cast<const char*>(buffer), n);
             chat_body.append(chunk);
             // Print streaming response in real-time
             ESP_LOGI(TAG, "[ChatStream] %s", chunk.c_str());
         }
-    };
-    chat_cb.on_write_complete = [](int stream_id, size_t total_bytes) {
-        ESP_LOGI(TAG, "[Stream %d] Upload complete: %zu bytes", stream_id, total_bytes);
-    };
-    chat_cb.on_complete = [&](int stream_id, bool success, const std::string& error) {
-        ESP_LOGI(TAG, "[Stream %d] ChatStream - Complete: %s", stream_id, success ? "OK" : error.c_str());
-        chat_success = success;
-        xSemaphoreGive(chat_sem);
-    };
-    
-    int chat_stream = manager.OpenStream(chat_req, chat_cb);
-    if (chat_stream >= 0) {
-        ESP_LOGI(TAG, "ChatStream opened: stream %d", chat_stream);
         
-        // Upload audio data
-        ESP_LOGI(TAG, "Uploading audio data (%zu bytes)...", audio_size);
-        manager.QueueWrite(chat_stream, audio_data, audio_size);
-        manager.FinishStream(chat_stream);
-        
-        // Wait for response to complete
-        ESP_LOGI(TAG, "Waiting for ChatStream response...");
-        if (xSemaphoreTake(chat_sem, pdMS_TO_TICKS(60000)) == pdTRUE) {
-            ESP_LOGI(TAG, "--- ChatStream Results ---");
-            ESP_LOGI(TAG, "Status: %d, Success: %s", chat_status, chat_success ? "Yes" : "No");
-        } else {
-            ESP_LOGW(TAG, "ChatStream timeout");
-        }
-        
-        manager.CleanupStream(chat_stream);
+        ESP_LOGI(TAG, "--- ChatStream Results ---");
+        ESP_LOGI(TAG, "Status: %d", chat_stream->GetStatus());
+        ESP_LOGI(TAG, "Response size: %zu bytes", chat_body.size());
     } else {
         ESP_LOGE(TAG, "Failed to open ChatStream");
     }
-    
-    vSemaphoreDelete(chat_sem);
     
     // =========================================
     // Phase 4: Wait for server to close connection
@@ -264,17 +235,17 @@ void TestHttp3ManagerSharedConnection(const char* hostname, uint16_t port) {
     ESP_LOGI(TAG, "Connection will stay open until server closes it (idle timeout: %u ms)", config.idle_timeout_ms);
     
     // Print connection statistics
-    auto stats = manager.GetStats();
+    auto stats = client.GetStatistics();
     ESP_LOGI(TAG, "=== Connection Stats ===");
-    ESP_LOGI(TAG, "  Packets sent: %lu", stats.packets_sent);
-    ESP_LOGI(TAG, "  Packets received: %lu", stats.packets_received);
-    ESP_LOGI(TAG, "  Bytes sent: %lu", stats.bytes_sent);
-    ESP_LOGI(TAG, "  Bytes received: %lu", stats.bytes_received);
-    ESP_LOGI(TAG, "  RTT: %lu ms", stats.rtt_ms);
+    ESP_LOGI(TAG, "  Packets sent: %u", stats.packets_sent);
+    ESP_LOGI(TAG, "  Packets received: %u", stats.packets_received);
+    ESP_LOGI(TAG, "  Bytes sent: %u", stats.bytes_sent);
+    ESP_LOGI(TAG, "  Bytes received: %u", stats.bytes_received);
+    ESP_LOGI(TAG, "  RTT: %u ms", stats.rtt_ms);
     
     // Keep waiting until connection is closed
     int idle_seconds = 0;
-    while (manager.IsConnected()) {
+    while (client.IsConnected()) {
         vTaskDelay(pdMS_TO_TICKS(10000));
         idle_seconds += 10;
         ESP_LOGI(TAG, "  Connection alive, idle for %d seconds...", idle_seconds);
@@ -285,55 +256,68 @@ void TestHttp3ManagerSharedConnection(const char* hostname, uint16_t port) {
     ESP_LOGI(TAG, "=== Test Complete ===");
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "Connection closed by server after %d seconds idle", idle_seconds);
-    
-    manager.Deinit();
 }
 
 /**
- * Test HTTP3 download speed
+ * Test HTTP3 download speed and write to OTA partition
  * 
  * Downloads a file from the specified URL and measures the speed.
+ * Writes the downloaded firmware to OTA partition.
  */
 void TestHttp3DownloadSpeed(const char* hostname, uint16_t port, const char* path) {
     ESP_LOGI(TAG, "===========================================");
-    ESP_LOGI(TAG, "=== HTTP3 Download Speed Test ===");
+    ESP_LOGI(TAG, "=== HTTP3 Download Speed Test (with OTA) ===");
     ESP_LOGI(TAG, "===========================================");
     ESP_LOGI(TAG, "Target: https://%s:%u%s", hostname, port, path);
     
-    // 1. Initialize Http3Manager
-    auto& manager = Http3Manager::GetInstance();
-    
-    Http3ManagerConfig config;
+    // 1. Initialize Http3Client
+    Http3ClientConfig config;
     config.hostname = hostname;
     config.port = port;
     config.connect_timeout_ms = 10000;
     config.request_timeout_ms = 300000;  // 5 minutes for large downloads
     config.idle_timeout_ms = 120000;
+    config.receive_buffer_size = 128 * 1024;
     config.enable_debug = false;  // Disable debug for speed test
     
-    if (!manager.Init(config)) {
-        ESP_LOGE(TAG, "Failed to init Http3Manager");
-        return;
-    }
+    Http3Client client(config);
     
     // 2. Establish connection
     ESP_LOGI(TAG, "Establishing QUIC connection...");
     int64_t connect_start = esp_timer_get_time();
     
-    if (!manager.EnsureConnected(20000)) {
-        ESP_LOGE(TAG, "Failed to connect");
-        manager.Deinit();
-        return;
+    // Connection is established on first Open() call
+    // We'll establish it with a test request if needed
+    if (!client.IsConnected()) {
+        Http3Request test_req;
+        test_req.method = "GET";
+        test_req.path = "/";
+        auto test_stream = client.Open(test_req, 20000);
+        if (!test_stream) {
+            ESP_LOGE(TAG, "Failed to connect");
+            return;
+        }
+        test_stream->Close();
     }
     
     int64_t connect_time = esp_timer_get_time() - connect_start;
     ESP_LOGI(TAG, "Connection established in %.2f ms", connect_time / 1000.0);
     
-    // 3. Download test
+    // 3. Prepare OTA partition
+    esp_ota_handle_t update_handle = 0;
+    const esp_partition_t* update_partition = esp_ota_get_next_update_partition(NULL);
+    
+    if (update_partition == NULL) {
+        ESP_LOGE(TAG, "Failed to get update partition");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Writing to OTA partition %s at offset 0x%lx", 
+             update_partition->label, update_partition->address);
+    
+    // 4. Download test
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "Starting download...");
-    
-    SemaphoreHandle_t download_sem = xSemaphoreCreateBinary();
     
     // Download statistics
     struct DownloadStats {
@@ -357,29 +341,110 @@ void TestHttp3DownloadSpeed(const char* hostname, uint16_t port, const char* pat
     req.method = "GET";
     req.path = path;
     
-    Http3StreamCallbacks cb;
-    cb.on_headers = [&](int stream_id, int status, const auto& headers) {
-        stats.status = status;
-        ESP_LOGI(TAG, "[Stream %d] Status: %d", stream_id, status);
+    auto stream = client.Open(req, 30000);
+    if (stream && stream->IsValid()) {
+        stats.status = stream->GetStatus(30000);
+        ESP_LOGI(TAG, "[Stream %d] Status: %d", stream->GetStreamId(), stats.status);
         
         // Find content-length header
-        for (const auto& h : headers) {
+        for (const auto& h : stream->GetHeaders()) {
             if (h.first == "content-length") {
                 stats.content_length = h.second;
-                ESP_LOGI(TAG, "[Stream %d] Content-Length: %s", stream_id, h.second.c_str());
+                ESP_LOGI(TAG, "[Stream %d] Content-Length: %s", stream->GetStreamId(), h.second.c_str());
             }
         }
-    };
-    
-    cb.on_data = [&](int stream_id, const uint8_t* data, size_t len, bool fin) {
-        if (data && len > 0) {
+        
+        // Read response data and write to OTA partition
+        static uint8_t buffer[4096];
+        int n;
+        bool image_header_checked = false;
+        std::string image_header;
+        bool ota_started = false;
+        
+        while ((n = stream->Read(buffer, sizeof(buffer), 5000)) > 0) {
             // Record time to first byte
             if (stats.total_bytes == 0) {
                 stats.first_byte_time = esp_timer_get_time() - stats.start_time;
             }
             
-            stats.total_bytes += len;
-            stats.bytes_since_last_report += len;
+            // Check image header and begin OTA if not started
+            if (!image_header_checked) {
+                image_header.append(reinterpret_cast<const char*>(buffer), n);
+                
+                if (image_header.size() >= sizeof(esp_image_header_t) + 
+                    sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t)) {
+                    
+                    // Verify image header
+                    esp_app_desc_t new_app_info;
+                    std::memcpy(&new_app_info, 
+                           image_header.data() + sizeof(esp_image_header_t) + 
+                           sizeof(esp_image_segment_header_t), 
+                           sizeof(esp_app_desc_t));
+                    
+                    auto current_version = esp_app_get_description()->version;
+                    ESP_LOGI(TAG, "Current version: %s, New version: %s", 
+                             current_version, new_app_info.version);
+                    
+                    // Begin OTA
+                    esp_err_t err = esp_ota_begin(update_partition, 
+                                                   OTA_WITH_SEQUENTIAL_WRITES, 
+                                                   &update_handle);
+                    
+                    if (err != ESP_OK) {
+                        ESP_LOGE(TAG, "Failed to begin OTA: %s", esp_err_to_name(err));
+                        stats.success = false;
+                        stats.error = "OTA begin failed";
+                        break;
+                    }
+                    
+                    // Write the buffered image header
+                    err = esp_ota_write(update_handle, 
+                                       reinterpret_cast<const uint8_t*>(image_header.data()), 
+                                       image_header.size());
+                    
+                    if (err != ESP_OK) {
+                        ESP_LOGE(TAG, "Failed to write OTA header: %s", esp_err_to_name(err));
+                        esp_ota_abort(update_handle);
+                        stats.success = false;
+                        stats.error = "OTA write header failed";
+                        break;
+                    }
+                    stats.total_bytes += image_header.size();
+                    image_header_checked = true;
+                    ota_started = true;
+                    std::string().swap(image_header);
+                    
+                    // Give IDLE task chance to run
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    
+                    // Skip to next iteration since we already wrote the header
+                    stats.bytes_since_last_report += n;
+                    stats.chunk_count++;
+                    continue;
+                }
+            }
+            
+            // Write remaining data to OTA partition
+            if (ota_started && update_handle != 0) {
+                // ESP_LOGI(TAG, "Writing OTA data to partition %s at offset 0x%lx bytes: %zu", 
+                //          update_partition->label, update_partition->address, n);
+                // esp_err_t err = esp_ota_write(update_handle, buffer, n);
+                
+                // if (err != ESP_OK) {
+                //     ESP_LOGE(TAG, "Failed to write OTA data: %s", esp_err_to_name(err));
+                //     esp_ota_abort(update_handle);
+                //     stats.success = false;
+                //     stats.error = "OTA write data failed";
+                //     break;
+                // }
+
+                // ESP_LOGI(TAG, "Wrote OTA data to partition %s at offset 0x%lx bytes: %zu", 
+                //          update_partition->label, update_partition->address, n);
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+            
+            stats.total_bytes += n;
+            stats.bytes_since_last_report += n;
             stats.chunk_count++;
             
             // Report every second
@@ -399,35 +464,49 @@ void TestHttp3DownloadSpeed(const char* hostname, uint16_t port, const char* pat
                 stats.bytes_since_last_report = 0;
             }
         }
-    };
-    
-    cb.on_complete = [&](int stream_id, bool success, const std::string& error) {
+        
         stats.end_time = esp_timer_get_time();
-        stats.success = success;
-        stats.error = error;
         
-        if (success) {
-            ESP_LOGI(TAG, "[Stream %d] Download complete", stream_id);
-        } else {
-            ESP_LOGE(TAG, "[Stream %d] Download failed: %s", stream_id, error.c_str());
-        }
-        
-        xSemaphoreGive(download_sem);
-    };
-    
-    int stream = manager.OpenStream(req, cb);
-    if (stream >= 0) {
-        manager.FinishStream(stream);  // No body for GET
-        
-        // Wait for download to complete (up to 5 minutes)
-        if (xSemaphoreTake(download_sem, pdMS_TO_TICKS(300000)) != pdTRUE) {
-            ESP_LOGE(TAG, "Download timeout!");
+        if (n < 0) {
+            // Error occurred
             stats.success = false;
-            stats.error = "Timeout";
-            stats.end_time = esp_timer_get_time();
+            stats.error = stream->GetError();
+            ESP_LOGE(TAG, "[Stream %d] Download failed: %s", stream->GetStreamId(), stats.error.c_str());
+            if (update_handle != 0) {
+                esp_ota_abort(update_handle);
+            }
+        } else if (!ota_started) {
+            // OTA not started (image header not complete)
+            stats.success = false;
+            stats.error = "Incomplete image header";
+            ESP_LOGE(TAG, "Image header incomplete or download too small");
+        } else {
+            // Success (n == 0 means EOF)
+            ESP_LOGI(TAG, "[Stream %d] Download complete, finalizing OTA", stream->GetStreamId());
+            
+            // End OTA
+            // esp_err_t err = esp_ota_end(update_handle);
+            // if (err != ESP_OK) {
+            //     if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+            //         ESP_LOGE(TAG, "Image validation failed, image is corrupted");
+            //     } else {
+            //         ESP_LOGE(TAG, "Failed to end OTA: %s", esp_err_to_name(err));
+            //     }
+            //     stats.success = false;
+            //     stats.error = "OTA end failed";
+            // } else {
+            //     // Set boot partition
+            //     err = esp_ota_set_boot_partition(update_partition);
+            //     if (err != ESP_OK) {
+            //         ESP_LOGE(TAG, "Failed to set boot partition: %s", esp_err_to_name(err));
+            //         stats.success = false;
+            //         stats.error = "Set boot partition failed";
+            //     } else {
+            //         stats.success = true;
+            //         ESP_LOGI(TAG, "Firmware upgrade successful");
+            //     }
+            // }
         }
-        
-        manager.CleanupStream(stream);
     } else {
         ESP_LOGE(TAG, "Failed to open download stream");
         stats.success = false;
@@ -435,9 +514,7 @@ void TestHttp3DownloadSpeed(const char* hostname, uint16_t port, const char* pat
         stats.end_time = esp_timer_get_time();
     }
     
-    vSemaphoreDelete(download_sem);
-    
-    // 4. Print results
+    // 5. Print results
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "===========================================");
     ESP_LOGI(TAG, "=== Download Speed Test Results ===");
@@ -484,18 +561,16 @@ void TestHttp3DownloadSpeed(const char* hostname, uint16_t port, const char* pat
     }
     
     // Print connection stats
-    auto conn_stats = manager.GetStats();
+    auto conn_stats = client.GetStatistics();
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "--- Connection Stats ---");
-    ESP_LOGI(TAG, "Packets sent: %lu", conn_stats.packets_sent);
-    ESP_LOGI(TAG, "Packets received: %lu", conn_stats.packets_received);
-    ESP_LOGI(TAG, "Total bytes sent: %lu", conn_stats.bytes_sent);
-    ESP_LOGI(TAG, "Total bytes received: %lu", conn_stats.bytes_received);
-    ESP_LOGI(TAG, "RTT: %lu ms", conn_stats.rtt_ms);
+    ESP_LOGI(TAG, "Packets sent: %u", conn_stats.packets_sent);
+    ESP_LOGI(TAG, "Packets received: %u", conn_stats.packets_received);
+    ESP_LOGI(TAG, "Total bytes sent: %u", conn_stats.bytes_sent);
+    ESP_LOGI(TAG, "Total bytes received: %u", conn_stats.bytes_received);
+    ESP_LOGI(TAG, "RTT: %u ms", conn_stats.rtt_ms);
     
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "===========================================");
-    
-    manager.Deinit();
 }
 

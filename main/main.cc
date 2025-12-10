@@ -18,7 +18,6 @@
 #include <esp_http_client.h>
 #include <esp_timer.h>
 #include <esp_crt_bundle.h>
-#include "http3_manager.h"
 #include <wifi_manager.h>
 #include <ssid_manager.h>
 #include "uart_eth_modem/uart_eth_modem.h"
@@ -505,11 +504,11 @@ extern "C" void app_main(void) {
     // TestHttp3ManagerSharedConnection("api.tenclass.net", 443);
     
     // HTTP 下载速度测试
-    const char* test_url = "https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/firmwares/v1.9.4_xmini-c3/xiaozhi.bin";
-    TestHttpClientDownload(test_url);
+    // const char* test_url = "https://xiaozhi-voice-assistant.oss-cn-shenzhen.aliyuncs.com/firmwares/v1.9.4_xmini-c3/xiaozhi.bin";
+    // TestHttpClientDownload(test_url);
 
         // 测试下载速度
-    // TestHttp3DownloadSpeed("api.tenclass.net", 443, "/pocket-sage/firmwares/pocket-sage.bin");
+    TestHttp3DownloadSpeed("api.tenclass.net", 443, "/pocket-sage/firmwares/pocket-sage.bin");
     
     ESP_LOGI(TAG, "HTTPS Demo completed");
 
