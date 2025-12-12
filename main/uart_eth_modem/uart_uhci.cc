@@ -402,7 +402,6 @@ esp_err_t UartUhci::StartReceive() {
         buf->size = 0;
 
         mount_configs[mounted].buffer = buf->data;
-        mount_configs[mounted].buffer_alignment = rx_int_mem_align_;
         mount_configs[mounted].length = buf->capacity;
         mount_configs[mounted].flags.mark_final = false;  // Not final, circular
         
@@ -532,10 +531,8 @@ esp_err_t UartUhci::Transmit(uint8_t* buffer, size_t size) {
 void UartUhci::DoTransmit(TransDesc* trans) {
     tx_cur_trans_ = trans;
 
-    size_t buf_align = esp_ptr_internal(trans->buffer) ? tx_int_mem_align_ : tx_ext_mem_align_;
     gdma_buffer_mount_config_t mount = {};
     mount.buffer = trans->buffer;
-    mount.buffer_alignment = buf_align;
     mount.length = trans->buffer_size;
     mount.flags.mark_eof = true;
     mount.flags.mark_final = true;
@@ -675,7 +672,6 @@ bool UartUhci::HandleGdmaRxDone(bool is_eof) {
 
         gdma_buffer_mount_config_t mount = {};
         mount.buffer = new_buf->data;
-        mount.buffer_alignment = rx_int_mem_align_;
         mount.length = new_buf->capacity;
         mount.flags.mark_final = false;
         

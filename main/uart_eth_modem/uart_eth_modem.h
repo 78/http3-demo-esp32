@@ -18,7 +18,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "iot_eth.h"
 #include "iot_eth_netif_glue.h"
@@ -351,7 +350,6 @@ private:
     QueueHandle_t event_queue_ = nullptr;
     std::mutex at_mutex_;
     std::mutex send_mutex_;
-    SemaphoreHandle_t at_command_response_semaphore_ = nullptr;
     EventGroupHandle_t event_group_ = nullptr;
 
     // UHCI DMA

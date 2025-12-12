@@ -118,21 +118,10 @@ esp_err_t UartEthModem::Start() {
         return ret;
     }
 
-    // Create semaphore for AT command response
-    at_command_response_semaphore_ = xSemaphoreCreateBinary();
-    if (!at_command_response_semaphore_) {
-        ESP_LOGE(kTag, "Failed to create AT semaphore");
-        vQueueDelete(event_queue_);
-        DeinitGpio();
-        DeinitUart();
-        return ESP_ERR_NO_MEM;
-    }
-
     // Allocate frame reassembly buffer
     reassembly_buffer_ = static_cast<uint8_t*>(heap_caps_malloc(kMaxFrameSize, MALLOC_CAP_INTERNAL));
     if (!reassembly_buffer_) {
         ESP_LOGE(kTag, "Failed to allocate reassembly buffer");
-        vSemaphoreDelete(at_command_response_semaphore_);
         vQueueDelete(event_queue_);
         DeinitGpio();
         DeinitUart();
@@ -158,7 +147,6 @@ esp_err_t UartEthModem::Start() {
         ESP_LOGE(kTag, "Failed to init UHCI: %s", esp_err_to_name(ret));
         free(reassembly_buffer_);
         reassembly_buffer_ = nullptr;
-        vSemaphoreDelete(at_command_response_semaphore_);
         vQueueDelete(event_queue_);
         DeinitGpio();
         DeinitUart();
@@ -190,7 +178,6 @@ esp_err_t UartEthModem::Start() {
         uart_uhci_.Deinit();
         free(reassembly_buffer_);
         reassembly_buffer_ = nullptr;
-        vSemaphoreDelete(at_command_response_semaphore_);
         vQueueDelete(event_queue_);
         DeinitGpio();
         DeinitUart();
@@ -251,7 +238,7 @@ esp_err_t UartEthModem::SendAt(const std::string& cmd, std::string& response, ui
 
     at_command_response_.clear();
     waiting_for_at_response_ = true;
-    xSemaphoreTake(at_command_response_semaphore_, 0);  // Clear any pending
+    xEventGroupClearBits(event_group_, kEventAtResponse);  // Clear any pending
 
     // Add \r if not present
     std::string cmd_with_cr = cmd;
@@ -271,7 +258,18 @@ esp_err_t UartEthModem::SendAt(const std::string& cmd, std::string& response, ui
     }
 
     // Wait for response
-    if (xSemaphoreTake(at_command_response_semaphore_, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+    EventBits_t bits = xEventGroupWaitBits(
+        event_group_,
+        kEventAtResponse | kEventStop,
+        pdTRUE,   // Clear on exit
+        pdFALSE,  // Wait for any bit
+        pdMS_TO_TICKS(timeout_ms)
+    );
+    if (bits & kEventStop) {
+        waiting_for_at_response_ = false;
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!(bits & kEventAtResponse)) {
         ESP_LOGW(kTag, "AT timeout: %s", cmd.c_str());
         waiting_for_at_response_ = false;
         return ESP_ERR_TIMEOUT;
@@ -296,29 +294,6 @@ void UartEthModem::SetNetworkEventCallback(UartEthModemEventCallback callback) {
 
 void UartEthModem::SetDebug(bool enabled) {
     debug_enabled_.store(enabled);
-}
-
-void UartEthModem::PrintStatistics(bool reset) {
-    auto stats = uart_uhci_.GetRxIsrStatistics();
-    
-    ESP_LOGI(kTag, "=== UART UHCI RX ISR Statistics ===");
-    ESP_LOGI(kTag, "  Call count: %lu", stats.call_count);
-    
-    if (stats.call_count > 0) {
-        uint32_t avg_time_us = static_cast<uint32_t>(stats.total_time_us / stats.call_count);
-        ESP_LOGI(kTag, "  Total time: %llu us", stats.total_time_us);
-        ESP_LOGI(kTag, "  Average time: %lu us", avg_time_us);
-        ESP_LOGI(kTag, "  Min time: %lu us", stats.min_time_us);
-        ESP_LOGI(kTag, "  Max time: %lu us", stats.max_time_us);
-    } else {
-        ESP_LOGI(kTag, "  No calls recorded yet");
-    }
-    ESP_LOGI(kTag, "====================================");
-    
-    if (reset) {
-        uart_uhci_.ResetRxIsrStatistics();
-        ESP_LOGI(kTag, "Statistics reset");
-    }
 }
 
 std::string UartEthModem::GetImei() {
@@ -874,7 +849,7 @@ void UartEthModem::HandleRxData(UartUhci::RxBuffer* buffer) {
                 
                 // Send ACK after processing complete frame
                 SendAckPulse();
-    }
+            }
         }
     }
 
@@ -1122,11 +1097,17 @@ esp_err_t UartEthModem::SendFrame(const uint8_t* data, size_t length, FrameType 
         // Wait for active state with DMA receive ready (max 50ms)
         EventBits_t bits = xEventGroupWaitBits(
             event_group_,
-            kEventActiveState,
+            kEventActiveState | kEventStop,
             pdFALSE,  // Don't clear on exit (will be cleared when entering idle)
             pdTRUE,   // Wait for all bits
             pdMS_TO_TICKS(50)
         );
+
+        if (bits & kEventStop) {
+            ESP_LOGW(kTag, "Stop event received in EnterActiveState");
+            free(buffer);
+            return ESP_ERR_INVALID_STATE;
+        }
         
         if (!(bits & kEventActiveState)) {
             ESP_LOGW(kTag, "Timeout waiting for active state");
@@ -1155,11 +1136,17 @@ esp_err_t UartEthModem::SendFrame(const uint8_t* data, size_t length, FrameType 
     // Wait for all bits to be set before continuing
     EventBits_t bits = xEventGroupWaitBits(
         event_group_,
-        kEventTxDone | kEventSrdyHigh,
+        kEventTxDone | kEventSrdyHigh | kEventStop,
         pdTRUE,   // clear on exit
         pdTRUE,   // wait for all bits
         pdMS_TO_TICKS(kAckTimeoutUs / 1000)
     );
+
+    if (bits & kEventStop) {
+        ESP_LOGW(kTag, "Stop event received in SendFrame");
+        free(buffer);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     if (!(bits & kEventTxDone)) {
         ESP_LOGE(kTag, "UHCI TX wait timeout");
@@ -1262,7 +1249,7 @@ void UartEthModem::HandleAtResponse(const char* data, size_t length) {
     // If waiting for AT response, signal completion
     if (waiting_for_at_response_) {
         at_command_response_ = response;
-        xSemaphoreGive(at_command_response_semaphore_);
+        xEventGroupSetBits(event_group_, kEventAtResponse);
     }
 }
 
@@ -1346,9 +1333,9 @@ esp_err_t UartEthModem::RunInitSequence() {
         return ret;
     }
 
-    ret = SendAt("AT+XJCFG=netPortBaudRate,3000000", resp, 1000);
+    ret = SendAt("AT+CFUN=1", resp, 3000);
     if (ret != ESP_OK) {
-        ESP_LOGE(kTag, "Failed to set network port baud rate");
+        ESP_LOGE(kTag, "Failed to send AT+CFUN=1");
         SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
         return ret;
     }
@@ -1367,8 +1354,11 @@ esp_err_t UartEthModem::RunInitSequence() {
         // Clear network status changed bit before reset
         xEventGroupClearBits(event_group_, kEventNetworkEventChanged);
         SendAt("AT+ECRST", resp, 500);
-        auto bits = xEventGroupWaitBits(event_group_, kEventNetworkEventChanged, pdTRUE, pdTRUE, pdMS_TO_TICKS(10000));
-        if (bits & kEventNetworkEventChanged) {
+        auto bits = xEventGroupWaitBits(event_group_, kEventNetworkEventChanged | kEventStop, pdTRUE, pdTRUE, pdMS_TO_TICKS(10000));
+        if (bits & kEventStop) {
+            ESP_LOGW(kTag, "Stop event received in ResetModem");
+            return ESP_ERR_INVALID_STATE;
+        } else if (bits & kEventNetworkEventChanged) {
             ESP_LOGI(kTag, "Modem reset completed");
         } else {
             ESP_LOGE(kTag, "Modem reset timed out");
@@ -1429,7 +1419,10 @@ esp_err_t UartEthModem::RunInitSequence() {
 
     // Wait for handshake ACK
     auto bits = xEventGroupWaitBits(event_group_, kEventHandshakeDone | kEventStop, pdFALSE, pdFALSE, pdMS_TO_TICKS(kHandshakeTimeoutMs));
-    if (bits & kEventHandshakeDone) {
+    if (bits & kEventStop) {
+        ESP_LOGW(kTag, "Stop event received in WaitForHandshake");
+        return ESP_ERR_INVALID_STATE;
+    } else if (bits & kEventHandshakeDone) {
         ESP_LOGI(kTag, "Handshake successful");
     } else {
         ESP_LOGE(kTag, "Handshake timeout");
@@ -1472,7 +1465,7 @@ bool UartEthModem::WaitForRegistration(uint32_t timeout_ms) {
     std::string resp;
     uint32_t start = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-    while (true) {
+    while (!stop_flag_.load()) {
         if (SendAt("AT+CEREG?", resp, 1000) == ESP_OK) {
             ParseAtResponse(resp);
             if (cell_info_.stat == 1 || cell_info_.stat == 5) {
@@ -1495,6 +1488,7 @@ bool UartEthModem::WaitForRegistration(uint32_t timeout_ms) {
 
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+    return false;
 }
 
 void UartEthModem::QueryModemInfo() {
@@ -1640,12 +1634,6 @@ void UartEthModem::CleanupResources(bool cleanup_iot_eth) {
     }
     reassembly_size_ = 0;
     reassembly_expected_ = 0;
-
-    // Cleanup semaphores
-    if (at_command_response_semaphore_) {
-        vSemaphoreDelete(at_command_response_semaphore_);
-        at_command_response_semaphore_ = nullptr;
-    }
 
     // Cleanup event queue
     if (event_queue_) {
